@@ -20,17 +20,68 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with imag
 
 ## Setup
 
-1. Create a Discord bot at https://discord.com/developers/applications
-   - Enable all Privileged Gateway Intents (Presence, Server Members, Message Content)
-   - Get the bot token
-2. Get an xAI API key at https://x.ai/api-keys
-3. Copy `.env.example` to `.env` and fill in your tokens:
+### 1. Create a Discord Bot
+
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
+2. Click **"New Application"** and give it a name (e.g., "Gronk")
+3. Go to the **"Bot"** tab in the left sidebar
+4. Click **"Add Bot"** and confirm
+5. Under the bot's username, click **"Reset Token"** and copy your bot token (save this for later)
+6. Scroll down to **"Privileged Gateway Intents"** and enable:
+   - ✅ Presence Intent
+   - ✅ Server Members Intent
+   - ✅ Message Content Intent
+7. Click **"Save Changes"**
+
+### 2. Invite the Bot to Your Server
+
+1. In the Discord Developer Portal, go to the **"OAuth2"** tab
+2. Click on **"URL Generator"** in the left sidebar
+3. Under **"Scopes"**, select:
+   - ✅ `bot`
+4. Under **"Bot Permissions"**, select:
+   - ✅ Read Messages/View Channels
+   - ✅ Send Messages
+   - ✅ Send Messages in Threads
+   - ✅ Embed Links
+   - ✅ Attach Files
+   - ✅ Read Message History
+   - ✅ Mention Everyone (optional, for @mentions)
+   - ✅ Add Reactions (optional)
+   - ✅ Use Slash Commands (optional)
+5. Copy the generated URL at the bottom and open it in your browser
+6. Select the server you want to add the bot to and click **"Authorize"**
+
+### 3. Get an xAI API Key
+
+1. Go to https://x.ai/api
+2. Sign up or log in to your xAI account
+3. Navigate to the API Keys section
+4. Create a new API key and copy it (save this for later)
+
+### 4. Configure the Bot
+
+1. Copy `.env.example` to `.env`:
+   ```powershell
+   cp .env.example .env
+   ```
+2. Edit `.env` and add your tokens:
    ```
    DISCORD_TOKEN=your_discord_token_here
    XAI_API_KEY=your_xai_api_key_here
    ```
-4. Install dependencies: `pip install -r requirements.txt`
-5. Run the bot: `python main.py`
+
+### 5. Install and Run
+
+1. Install dependencies:
+   ```powershell
+   pip install -r requirements.txt
+   ```
+2. Run the bot:
+   ```powershell
+   python main.py
+   ```
+3. The bot should now be online in your Discord server!
 
 ## Usage
 

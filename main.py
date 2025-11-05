@@ -19,6 +19,21 @@ load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 XAI_KEY = os.getenv('XAI_API_KEY')
 
+# Model configuration (with defaults)
+GROK_TEXT_MODEL = os.getenv('GROK_TEXT_MODEL', 'grok-4-fast')
+GROK_VISION_MODEL = os.getenv('GROK_VISION_MODEL', 'grok-2-vision-1212')
+
+# Search configuration (with defaults)
+MAX_SEARCH_RESULTS = int(os.getenv('MAX_SEARCH_RESULTS', '3'))
+
+# Pricing configuration (with defaults based on current xAI pricing)
+GROK_TEXT_INPUT_COST = float(os.getenv('GROK_TEXT_INPUT_COST', '0.20'))
+GROK_TEXT_OUTPUT_COST = float(os.getenv('GROK_TEXT_OUTPUT_COST', '0.50'))
+GROK_VISION_INPUT_COST = float(os.getenv('GROK_VISION_INPUT_COST', '2.00'))
+GROK_VISION_OUTPUT_COST = float(os.getenv('GROK_VISION_OUTPUT_COST', '10.00'))
+GROK_CACHED_COST = float(os.getenv('GROK_CACHED_COST', '0.05'))
+GROK_SEARCH_COST = float(os.getenv('GROK_SEARCH_COST', '25.00'))
+
 client = OpenAI(api_key=XAI_KEY, base_url="https://api.x.ai/v1")
 
 bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
@@ -160,14 +175,14 @@ async def search_history(ctx, *, query_text: str):
         # Query Grok
         async with ctx.channel.typing():
             completion = client.chat.completions.create(
-                model="grok-4-fast",
+                model=GROK_TEXT_MODEL,
                 messages=[
                     {"role": "user", "content": full_prompt}
                 ],
                 extra_body={
                     "search_parameters": {
                         "mode": "auto",
-                        "max_search_results": 3  # Reduced from 5 to save costs ($0.075 vs $0.125 per search)
+                        "max_search_results": MAX_SEARCH_RESULTS
                     }
                 }
             )
@@ -181,10 +196,10 @@ async def search_history(ctx, *, query_text: str):
                 if hasattr(completion.usage, 'prompt_tokens_details') and completion.usage.prompt_tokens_details:
                     cached = completion.usage.prompt_tokens_details.cached_tokens
                     uncached = completion.usage.prompt_tokens - cached
-                    input_cost = (uncached / 1_000_000) * 0.20 + (cached / 1_000_000) * 0.05
+                    input_cost = (uncached / 1_000_000) * GROK_TEXT_INPUT_COST + (cached / 1_000_000) * GROK_CACHED_COST
                 else:
-                    input_cost = (completion.usage.prompt_tokens / 1_000_000) * 0.20
-                output_cost = (completion.usage.completion_tokens / 1_000_000) * 0.50
+                    input_cost = (completion.usage.prompt_tokens / 1_000_000) * GROK_TEXT_INPUT_COST
+                output_cost = (completion.usage.completion_tokens / 1_000_000) * GROK_TEXT_OUTPUT_COST
                 request_cost = input_cost + output_cost
                 usage_text = f"💵 ${request_cost:.6f} • {completion.usage.prompt_tokens} in / {completion.usage.completion_tokens} out"
             
@@ -551,7 +566,7 @@ async def on_message(message):
         try:
             async with message.channel.typing():
                 # Determine model based on whether we have images
-                model = "grok-2-vision-1212" if image_urls else "grok-4-fast"
+                model = GROK_VISION_MODEL if image_urls else GROK_TEXT_MODEL
                 logger.info(f'Using model: {model} (images: {len(image_urls)})')
                 
                 # Build message content with conversation history
@@ -587,7 +602,7 @@ async def on_message(message):
                         extra_body={
                             "search_parameters": {
                                 "mode": "auto",  # Let Grok decide when to search
-                                "max_search_results": 3  # Reduced from 5 to save costs ($0.075 vs $0.125 per search)
+                                "max_search_results": MAX_SEARCH_RESULTS
                             }
                         }
                     )
@@ -624,24 +639,24 @@ async def on_message(message):
                     # Calculate token cost based on actual model used
                     model_used = completion.model
                     if 'vision' in model_used.lower():
-                        # Grok-vision pricing: $2/1M input, $10/1M output
-                        input_cost = (completion.usage.prompt_tokens / 1_000_000) * 2.00
-                        output_cost = (completion.usage.completion_tokens / 1_000_000) * 10.00
+                        # Grok-vision pricing
+                        input_cost = (completion.usage.prompt_tokens / 1_000_000) * GROK_VISION_INPUT_COST
+                        output_cost = (completion.usage.completion_tokens / 1_000_000) * GROK_VISION_OUTPUT_COST
                     else:
-                        # Grok-4-fast pricing: $0.20/1M input, $0.50/1M output
+                        # Grok text model pricing
                         # Account for cached tokens if available
                         if hasattr(completion.usage, 'prompt_tokens_details') and completion.usage.prompt_tokens_details:
                             cached = completion.usage.prompt_tokens_details.cached_tokens
                             uncached = completion.usage.prompt_tokens - cached
-                            input_cost = (uncached / 1_000_000) * 0.20 + (cached / 1_000_000) * 0.05
+                            input_cost = (uncached / 1_000_000) * GROK_TEXT_INPUT_COST + (cached / 1_000_000) * GROK_CACHED_COST
                         else:
-                            input_cost = (completion.usage.prompt_tokens / 1_000_000) * 0.20
-                        output_cost = (completion.usage.completion_tokens / 1_000_000) * 0.50
+                            input_cost = (completion.usage.prompt_tokens / 1_000_000) * GROK_TEXT_INPUT_COST
+                        output_cost = (completion.usage.completion_tokens / 1_000_000) * GROK_TEXT_OUTPUT_COST
                     
-                    # Calculate search cost if sources were used ($25 per 1K sources)
+                    # Calculate search cost if sources were used
                     num_sources = getattr(completion.usage, 'num_sources_used', 0)
                     if num_sources > 0:
-                        search_cost = (num_sources / 1000) * 25.00
+                        search_cost = (num_sources / 1000) * GROK_SEARCH_COST
                         logger.info(f"Search usage - Sources used: {num_sources}, Cost: ${search_cost:.6f}")
                     
                     request_cost = input_cost + output_cost + search_cost

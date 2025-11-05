@@ -70,6 +70,27 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with imag
    DISCORD_TOKEN=your_discord_token_here
    XAI_API_KEY=your_xai_api_key_here
    ```
+3. **(Optional)** Customize model, search, and pricing settings:
+   ```
+   # Model Configuration (Optional - defaults shown)
+   GROK_TEXT_MODEL=grok-4-fast
+   GROK_VISION_MODEL=grok-2-vision-1212
+   
+   # Search Configuration (Optional - defaults shown)
+   MAX_SEARCH_RESULTS=3
+   
+   # Pricing Configuration (Optional - defaults based on current xAI pricing)
+   GROK_TEXT_INPUT_COST=0.20
+   GROK_TEXT_OUTPUT_COST=0.50
+   GROK_VISION_INPUT_COST=2.00
+   GROK_VISION_OUTPUT_COST=10.00
+   GROK_CACHED_COST=0.05
+   GROK_SEARCH_COST=25.00
+   ```
+   - **GROK_TEXT_MODEL**: Model used for text-only responses
+   - **GROK_VISION_MODEL**: Model used when analyzing images
+   - **MAX_SEARCH_RESULTS**: Number of web sources to fetch (1-10, higher = more cost)
+   - **Pricing variables**: Cost per 1M tokens (text/vision input/output, cached) and per 1K search sources
 
 ### 5. Install and Run
 
@@ -109,9 +130,9 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with imag
 - **Web Search**: $25.00 per 1,000 sources (currently limited to 3 sources per search)
 - **Cached tokens**: $0.05/1M (75% discount on repeated context)
 
-> **Note:** Pricing and models are subject to change by xAI. Check [x.ai/api](https://x.ai/api) for current pricing. To update models in the bot, edit the model names in `main.py` (search for `grok-4-fast` and `grok-2-vision-1212`).
+> **Note:** Pricing and models are subject to change by xAI. Check [x.ai/api](https://x.ai/api) for current pricing. To update models, edit `GROK_TEXT_MODEL` and `GROK_VISION_MODEL` in your `.env` file. To adjust web search depth, modify `MAX_SEARCH_RESULTS` (higher values increase costs).
 
-> **Cost Calculations:** The bot displays estimated costs on each response card based on static pricing values hardcoded in `main.py`. These calculations use the current pricing rates shown above. If xAI changes their pricing, you'll need to manually update the cost calculation formulas in the code to reflect the new rates.
+> **Cost Calculations:** The bot displays estimated costs on each response card based on pricing values configured in your `.env` file. These calculations use the pricing rates shown above by default. If xAI changes their pricing, simply update the `GROK_*_COST` variables in your `.env` file to reflect the new rates.
 
 ## Architecture
 

@@ -23,13 +23,6 @@ client = OpenAI(api_key=XAI_KEY, base_url="https://api.x.ai/v1")
 
 bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
 
-# Track token usage
-token_usage = {
-    'input_tokens': 0,
-    'output_tokens': 0,
-    'requests': 0
-}
-
 # Track search context for follow-up queries
 search_context = {}  # {channel_id: {user_id: {searched_user: User, messages: [...], query: str}}}
 
@@ -40,59 +33,6 @@ conversation_history = {}  # {channel_id: {user_id: [{"role": "user/assistant", 
 async def on_ready():
     logger.info(f'Bot logged in as {bot.user} (ID: {bot.user.id})')
     logger.info(f'Connected to {len(bot.guilds)} server(s)')
-
-@bot.command(name='usage')
-async def check_usage(ctx):
-    """Check bot's token usage statistics"""
-    logger.info(f'Usage command requested by {ctx.author}')
-    
-    embed = discord.Embed(
-        title="📊 Grok API Usage Statistics",
-        description="Current session token usage",
-        color=discord.Color.green()
-    )
-    
-    embed.add_field(
-        name="📥 Input Tokens",
-        value=f"{token_usage['input_tokens']:,}",
-        inline=True
-    )
-    
-    embed.add_field(
-        name="📤 Output Tokens",
-        value=f"{token_usage['output_tokens']:,}",
-        inline=True
-    )
-    
-    embed.add_field(
-        name="🔢 Total Requests",
-        value=f"{token_usage['requests']:,}",
-        inline=True
-    )
-    
-    # Calculate estimated cost (based on xAI official pricing 2025)
-    # Grok-4-fast: $0.20 per 1M input, $0.50 per 1M output
-    # Grok-2-vision: $2.00 per 1M input, $10.00 per 1M output
-    # Using Grok-4-fast pricing (most common)
-    input_cost = (token_usage['input_tokens'] / 1_000_000) * 0.20
-    output_cost = (token_usage['output_tokens'] / 1_000_000) * 0.50
-    total_cost = input_cost + output_cost
-    
-    embed.add_field(
-        name="💰 Estimated Cost",
-        value=f"${total_cost:.4f}",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="📊 Cost Breakdown",
-        value=f"Input: ${input_cost:.4f} | Output: ${output_cost:.4f}",
-        inline=False
-    )
-    
-    embed.set_footer(text="Grok-4-fast: $0.20/1M in, $0.50/1M out | Grok-vision: $2/1M in, $10/1M out | Beta: $25 free")
-    
-    await ctx.reply(embed=embed)
 
 @bot.command(name='search')
 async def search_history(ctx, *, query_text: str):
@@ -247,11 +187,6 @@ async def search_history(ctx, *, query_text: str):
                 output_cost = (completion.usage.completion_tokens / 1_000_000) * 0.50
                 request_cost = input_cost + output_cost
                 usage_text = f"💵 ${request_cost:.6f} • {completion.usage.prompt_tokens} in / {completion.usage.completion_tokens} out"
-                
-                # Track usage
-                token_usage['input_tokens'] += completion.usage.prompt_tokens
-                token_usage['output_tokens'] += completion.usage.completion_tokens
-                token_usage['requests'] += 1
             
             # Delete searching message
             await searching_msg.delete()
@@ -686,10 +621,6 @@ async def on_message(message):
                 search_cost = 0
                 usage_text = ""
                 if hasattr(completion, 'usage') and completion.usage:
-                    token_usage['input_tokens'] += completion.usage.prompt_tokens
-                    token_usage['output_tokens'] += completion.usage.completion_tokens
-                    token_usage['requests'] += 1
-                    
                     # Calculate token cost based on actual model used
                     model_used = completion.model
                     if 'vision' in model_used.lower():

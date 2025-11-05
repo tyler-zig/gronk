@@ -7,8 +7,7 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with imag
 - 🤖 **AI Responses**: Powered by Grok-4-fast for text and Grok-2-vision for images
 - 🖼️ **Image Analysis**: Upload images or paste image URLs for vision analysis
 - 🔍 **Live Web Search**: Real-time web searches with automatic citations
-- 💬 **Conversation Memory**: Remembers context when you reply to Grok
-- 📊 **Usage Tracking**: `!usage` command shows token usage and costs
+- 💬 **Conversation Memory**: Remembers context when you reply to Gronk
 - 🔎 **Message Search**: `!search` command to analyze message history
 - 💵 **Cost Transparency**: Shows exact cost per request including search
 
@@ -40,10 +39,16 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with imag
 - **Reply chains**: Gronk sees full conversation context in reply threads
 
 ### Commands
-- **`!usage`**: Check token usage statistics and costs
 - **`!search @user [keywords] <query>`**: Search a user's message history
   - Example: `!search @john keyword:python what did he say about testing?`
   - Omit username for channel-wide search
+  
+**Search Limitations:**
+- Maximum of 1,000 messages scanned by default (3,000 with keyword filter)
+- Only analyzes up to 100 messages to stay within token limits
+- Each message truncated to 300 characters for context
+- Bot messages are excluded from channel-wide searches
+- Follow-up queries use the same message set from the original search
 
 ### Cost Information
 - **Grok-4-fast**: $0.20/1M input tokens, $0.50/1M output tokens

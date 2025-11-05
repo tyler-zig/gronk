@@ -59,3 +59,5 @@ SYNOLOGY_GUI_SETUP.md
 SYNOLOGY_IMPORT_GUIDE.md
 SYNOLOGY_SETUP.md
 .github/workflows/deploy-gcp.yml
+discloud.config
+discloud.config

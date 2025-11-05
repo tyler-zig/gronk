@@ -34,10 +34,10 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with imag
 ## Usage
 
 ### Basic Interaction
-- **Mention the bot**: `@Grok what's the weather?`
-- **Reply to Grok**: Reply to any of Grok's messages without mentioning (conversation memory)
+- **Mention the bot**: `@Gronk what's the weather?`
+- **Reply to Gronk**: Reply to any of Gronk's messages without mentioning (conversation memory)
 - **Upload images**: Attach images or paste image URLs for visual analysis
-- **Reply chains**: Grok sees full conversation context in reply threads
+- **Reply chains**: Gronk sees full conversation context in reply threads
 
 ### Commands
 - **`!usage`**: Check token usage statistics and costs

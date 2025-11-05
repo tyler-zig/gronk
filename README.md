@@ -77,6 +77,7 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with imag
    GROK_VISION_MODEL=grok-2-vision-1212
    
    # Search Configuration (Optional - defaults shown)
+   ENABLE_WEB_SEARCH=true
    MAX_SEARCH_RESULTS=3
    
    # Pricing Configuration (Optional - defaults based on current xAI pricing)
@@ -89,6 +90,7 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with imag
    ```
    - **GROK_TEXT_MODEL**: Model used for text-only responses
    - **GROK_VISION_MODEL**: Model used when analyzing images
+   - **ENABLE_WEB_SEARCH**: Enable/disable live web search (true/false)
    - **MAX_SEARCH_RESULTS**: Number of web sources to fetch (1-10, higher = more cost)
    - **Pricing variables**: Cost per 1M tokens (text/vision input/output, cached) and per 1K search sources
 

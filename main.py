@@ -24,6 +24,7 @@ GROK_TEXT_MODEL = os.getenv('GROK_TEXT_MODEL', 'grok-4-fast')
 GROK_VISION_MODEL = os.getenv('GROK_VISION_MODEL', 'grok-2-vision-1212')
 
 # Search configuration (with defaults)
+ENABLE_WEB_SEARCH = os.getenv('ENABLE_WEB_SEARCH', 'true').lower() == 'true'
 MAX_SEARCH_RESULTS = int(os.getenv('MAX_SEARCH_RESULTS', '3'))
 
 # Pricing configuration (with defaults based on current xAI pricing)
@@ -174,18 +175,22 @@ async def search_history(ctx, *, query_text: str):
         
         # Query Grok
         async with ctx.channel.typing():
-            completion = client.chat.completions.create(
-                model=GROK_TEXT_MODEL,
-                messages=[
-                    {"role": "user", "content": full_prompt}
-                ],
-                extra_body={
+            # Build request parameters
+            request_params = {
+                "model": GROK_TEXT_MODEL,
+                "messages": [{"role": "user", "content": full_prompt}]
+            }
+            
+            # Add search parameters if enabled
+            if ENABLE_WEB_SEARCH:
+                request_params["extra_body"] = {
                     "search_parameters": {
                         "mode": "auto",
                         "max_search_results": MAX_SEARCH_RESULTS
                     }
                 }
-            )
+            
+            completion = client.chat.completions.create(**request_params)
             
             response = completion.choices[0].message.content
             
@@ -596,16 +601,23 @@ async def on_message(message):
                     messages_to_send.append({"role": "user", "content": prompt})
                     
                     logger.info(f'Sending text-only request to Grok with {len(messages_to_send)} messages (history: {len(conversation_messages)})')
-                    completion = client.chat.completions.create(
-                        model=model,
-                        messages=messages_to_send,
-                        extra_body={
+                    
+                    # Build request parameters
+                    request_params = {
+                        "model": model,
+                        "messages": messages_to_send
+                    }
+                    
+                    # Add search parameters if enabled
+                    if ENABLE_WEB_SEARCH:
+                        request_params["extra_body"] = {
                             "search_parameters": {
                                 "mode": "auto",  # Let Grok decide when to search
                                 "max_search_results": MAX_SEARCH_RESULTS
                             }
                         }
-                    )
+                    
+                    completion = client.chat.completions.create(**request_params)
                 
                 response = completion.choices[0].message.content
                 logger.info(f'Received response from Grok ({len(response)} characters)')

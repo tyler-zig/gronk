@@ -45,3 +45,17 @@ Thumbs.db
 test_*.py
 .env2
 .env
+.dockerignore
+build-and-export.ps1
+build-and-export.sh
+deploy-gcp.sh
+docker-compose-synology.yml
+docker-compose.yml
+Dockerfile
+GCP_DEPLOYMENT.md
+grok-discord-bot.tar
+startup-script.sh
+SYNOLOGY_GUI_SETUP.md
+SYNOLOGY_IMPORT_GUIDE.md
+SYNOLOGY_SETUP.md
+.github/workflows/deploy-gcp.yml

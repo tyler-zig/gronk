@@ -12,9 +12,12 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with imag
 - 🔎 **Message Search**: `!search` command to analyze message history
 - 💵 **Cost Transparency**: Shows exact cost per request including search
 
-## Setup
+## Requirements
 
-### Local Development
+- Python 3.11 or higher
+- pip (Python package manager)
+
+## Setup
 
 1. Create a Discord bot at https://discord.com/developers/applications
    - Enable all Privileged Gateway Intents (Presence, Server Members, Message Content)
@@ -27,28 +30,6 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with imag
    ```
 4. Install dependencies: `pip install -r requirements.txt`
 5. Run the bot: `python main.py`
-
-### Deploy on Render
-
-1. **Create a Render account** at https://render.com
-2. **Push your code to GitHub** (make sure `.env` is in `.gitignore`)
-3. **Create a new Web Service** on Render:
-   - Connect your GitHub repository
-   - Render will auto-detect the `render.yaml` configuration
-4. **Set environment variables** in Render Dashboard:
-   - `DISCORD_TOKEN`: Your Discord bot token
-   - `XAI_API_KEY`: Your xAI API key
-5. **Deploy**: Render will automatically build and deploy your bot
-
-#### Render Configuration
-
-The bot includes a `render.yaml` file that configures:
-- Python 3.11 runtime
-- Automatic dependency installation
-- Start command: `python main.py`
-- Auto-deploy on git push
-
-**Note**: Discord bots don't need a web server, but Render's free tier requires a "web" service type. The bot will run continuously as long as the service is active.
 
 ## Usage
 
@@ -83,4 +64,3 @@ The bot includes a `render.yaml` file that configures:
 - **Bot doesn't respond**: Check that Message Content Intent is enabled in Discord Developer Portal
 - **Image errors**: Only JPEG, PNG, and WebP formats are supported
 - **High costs**: Reduce `max_search_results` in `main.py` or set search mode to `"never"`
-- **Render deployment issues**: Check environment variables are set correctly in Render Dashboard

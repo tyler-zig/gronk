@@ -2,7 +2,7 @@
 
 A Discord bot that integrates with xAI's Grok API to answer questions, with image support, live web search, and conversation memory.
 
-> **⚠️ Important:** This bot requires an xAI Grok API key, which is a **paid service**. You will be charged based on token usage and web search requests. See the [Cost Information](#cost-information) section below for pricing details. xAI offers a $25 free credit for new users during the beta period.
+> **⚠️ Important:** This bot requires an xAI Grok API key, which is a **paid service**. You will be charged based on token usage and web search requests. See the [Cost Information](#cost-information) section below for pricing details.
 
 ## Features
 

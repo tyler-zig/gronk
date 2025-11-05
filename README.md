@@ -82,9 +82,9 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with imag
    # Pricing Configuration (Optional - defaults based on current xAI pricing)
    GROK_TEXT_INPUT_COST=0.20
    GROK_TEXT_OUTPUT_COST=0.50
+   GROK_TEXT_CACHED_COST=0.05
    GROK_VISION_INPUT_COST=2.00
    GROK_VISION_OUTPUT_COST=10.00
-   GROK_CACHED_COST=0.05
    GROK_SEARCH_COST=25.00
    ```
    - **GROK_TEXT_MODEL**: Model used for text-only responses

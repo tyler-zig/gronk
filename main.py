@@ -29,9 +29,9 @@ MAX_SEARCH_RESULTS = int(os.getenv('MAX_SEARCH_RESULTS', '3'))
 # Pricing configuration (with defaults based on current xAI pricing)
 GROK_TEXT_INPUT_COST = float(os.getenv('GROK_TEXT_INPUT_COST', '0.20'))
 GROK_TEXT_OUTPUT_COST = float(os.getenv('GROK_TEXT_OUTPUT_COST', '0.50'))
+GROK_TEXT_CACHED_COST = float(os.getenv('GROK_TEXT_CACHED_COST', '0.05'))
 GROK_VISION_INPUT_COST = float(os.getenv('GROK_VISION_INPUT_COST', '2.00'))
 GROK_VISION_OUTPUT_COST = float(os.getenv('GROK_VISION_OUTPUT_COST', '10.00'))
-GROK_CACHED_COST = float(os.getenv('GROK_CACHED_COST', '0.05'))
 GROK_SEARCH_COST = float(os.getenv('GROK_SEARCH_COST', '25.00'))
 
 client = OpenAI(api_key=XAI_KEY, base_url="https://api.x.ai/v1")
@@ -196,7 +196,7 @@ async def search_history(ctx, *, query_text: str):
                 if hasattr(completion.usage, 'prompt_tokens_details') and completion.usage.prompt_tokens_details:
                     cached = completion.usage.prompt_tokens_details.cached_tokens
                     uncached = completion.usage.prompt_tokens - cached
-                    input_cost = (uncached / 1_000_000) * GROK_TEXT_INPUT_COST + (cached / 1_000_000) * GROK_CACHED_COST
+                    input_cost = (uncached / 1_000_000) * GROK_TEXT_INPUT_COST + (cached / 1_000_000) * GROK_TEXT_CACHED_COST
                 else:
                     input_cost = (completion.usage.prompt_tokens / 1_000_000) * GROK_TEXT_INPUT_COST
                 output_cost = (completion.usage.completion_tokens / 1_000_000) * GROK_TEXT_OUTPUT_COST
@@ -648,7 +648,7 @@ async def on_message(message):
                         if hasattr(completion.usage, 'prompt_tokens_details') and completion.usage.prompt_tokens_details:
                             cached = completion.usage.prompt_tokens_details.cached_tokens
                             uncached = completion.usage.prompt_tokens - cached
-                            input_cost = (uncached / 1_000_000) * GROK_TEXT_INPUT_COST + (cached / 1_000_000) * GROK_CACHED_COST
+                            input_cost = (uncached / 1_000_000) * GROK_TEXT_INPUT_COST + (cached / 1_000_000) * GROK_TEXT_CACHED_COST
                         else:
                             input_cost = (completion.usage.prompt_tokens / 1_000_000) * GROK_TEXT_INPUT_COST
                         output_cost = (completion.usage.completion_tokens / 1_000_000) * GROK_TEXT_OUTPUT_COST

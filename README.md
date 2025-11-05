@@ -2,6 +2,8 @@
 
 A Discord bot that integrates with xAI's Grok API to answer questions, with image support, live web search, and conversation memory.
 
+> **⚠️ Important:** This bot requires an xAI Grok API key, which is a **paid service**. You will be charged based on token usage and web search requests. See the [Cost Information](#cost-information) section below for pricing details. xAI offers a $25 free credit for new users during the beta period.
+
 ## Features
 
 - 🤖 **AI Responses**: Powered by Grok-4-fast for text and Grok-2-vision for images
@@ -55,6 +57,10 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with imag
 - **Grok-2-vision**: $2.00/1M input tokens, $10.00/1M output tokens
 - **Web Search**: $25.00 per 1,000 sources (currently limited to 3 sources per search)
 - **Cached tokens**: $0.05/1M (75% discount on repeated context)
+
+> **Note:** Pricing and models are subject to change by xAI. Check [x.ai/api](https://x.ai/api) for current pricing. To update models in the bot, edit the model names in `main.py` (search for `grok-4-fast` and `grok-2-vision-1212`).
+
+> **Cost Calculations:** The bot displays estimated costs on each response card based on static pricing values hardcoded in `main.py`. These calculations use the current pricing rates shown above. If xAI changes their pricing, you'll need to manually update the cost calculation formulas in the code to reflect the new rates.
 
 ## Architecture
 

@@ -159,6 +159,12 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with adva
 **Search Behavior:**
 - **Regular search**: Scans last N messages (default: 1000, configurable per query)
 - **Keyword search**: Scans entire channel history up to `MAX_KEYWORD_SCAN` (default: 10,000)
+  - ⚠️ **Performance Warning**: Keyword searches can take 10-30+ seconds depending on `MAX_KEYWORD_SCAN` value
+  - With `MAX_KEYWORD_SCAN=10000`: ~10-20 seconds
+  - With `MAX_KEYWORD_SCAN=25000`: ~30-60 seconds
+  - With `MAX_KEYWORD_SCAN=50000`: ~60-120+ seconds
+  - Progress updates shown every 2000 messages to indicate the bot is still working
+  - Reduce `MAX_KEYWORD_SCAN` in `.env` for faster searches at the cost of less history coverage
 - **Analysis limit**: Analyzes up to 100 most recent messages (token limit)
 - **Message length**: Each message truncated to 300 characters in analysis
 - **Bot filtering**: Bot messages excluded from channel-wide searches

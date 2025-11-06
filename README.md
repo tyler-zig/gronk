@@ -27,8 +27,25 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with adva
 
 ## Requirements
 
-- Python 3.11 or higher
-- pip (Python package manager)
+### System Requirements
+- **Python 3.11 or higher** (tested on 3.11+)
+- **pip** (Python package manager)
+- **Internet connection** (for API calls to xAI and Discord)
+
+### API Keys Required
+- **Discord Bot Token** (free - from Discord Developer Portal)
+- **xAI API Key** (paid - from https://x.ai/api)
+
+### Python Dependencies
+All dependencies are listed in `requirements.txt`:
+- `discord.py` - Discord bot framework
+- `openai` - OpenAI-compatible client for xAI Grok API
+- `python-dotenv` - Environment variable management
+- `pytz` - Timezone handling for accurate timestamps
+
+### Optional
+- **Docker** - For containerized deployment (see deployment guides)
+- **Git** - For cloning the repository and version control
 
 ## Setup
 

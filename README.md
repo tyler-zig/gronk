@@ -44,7 +44,7 @@ All dependencies are listed in `requirements.txt`:
 - `pytz` - Timezone handling for accurate timestamps
 
 ### Optional
-- **Docker** - For containerized deployment (see deployment guides)
+- **Docker** - For containerized deployment
 - **Git** - For cloning the repository and version control
 
 ## Setup
@@ -172,9 +172,10 @@ Simply mention Gronk and ask questions about your Discord history naturally:
 **How it works:**
 - 🎯 **Smart Detection**: Automatically determines if you're asking about Discord history or general questions
 - 🔍 **Hybrid Classification**: Uses keyword patterns + Grok AI classification for ambiguous queries
-- ⏱️ **Time Parsing**: Understands "past month", "last week", "recently", etc.
-- 🏷️ **Topic Extraction**: Detects keywords like "about Python", "regarding AI", etc.
+- ⏱️ **Time Recognition**: Recognizes temporal phrases like "past month", "last week", "recently"
+- 🏷️ **Topic Extraction**: Detects keywords like "about Python", "regarding AI", etc. for filtering
 - 📊 **Same Power**: Uses the same analysis engine as `!search` with citations and timestamps
+- 🚀 **Efficient Scanning**: Automatically scans only `MAX_MESSAGES_ANALYZED` for general queries (fast!)
 
 **What triggers Discord search:**
 - ✅ Mentioning a user: `@Gronk @john what did he say?`
@@ -204,10 +205,12 @@ Simply mention Gronk and ask questions about your Discord history naturally:
 
 **Advanced Options:**
 ```
-!search @user 5000 query                           # Specify message limit (default: 1000)
-!search keyword:Python summarize Python discussions # Pre-filter by keyword
+!search @user 5000 query                           # Specify message limit (used with keywords)
+!search keyword:Python summarize Python discussions # Pre-filter by keyword (scans more history)
 !search @user keyword:bot 2000 what about bots?    # Combine user, keyword, and limit
 ```
+
+**Note:** Without a keyword filter, the bot automatically limits scanning to `MAX_MESSAGES_ANALYZED` for efficiency, since that's all it can send to Grok anyway. Use keyword filters to search deeper history.
 
 **Features:**
 - 🔗 **Inline Citations**: Grok cites specific messages as `[#5]` which become clickable links
@@ -218,17 +221,20 @@ Simply mention Gronk and ask questions about your Discord history naturally:
 - 🕐 **Smart Timestamps**: All timestamps converted to your configured timezone
 
 **Search Behavior:**
-- **Regular search**: Scans last N messages (default: 1000, configurable per query)
-- **Keyword search**: Scans entire channel history up to `MAX_KEYWORD_SCAN` (default: 10,000)
+- **General search (no keyword)**: Scans only up to `MAX_MESSAGES_ANALYZED` (default: 500-1000)
+  - Fast and efficient since we only scan what can be analyzed
+  - Perfect for recent history analysis
+- **Keyword search**: Scans up to `MAX_KEYWORD_SCAN` (default: 10,000) to find matching messages
   - ⚠️ **Performance Warning**: Keyword searches can take 10-30+ seconds depending on `MAX_KEYWORD_SCAN` value
   - With `MAX_KEYWORD_SCAN=10000`: ~10-20 seconds
   - With `MAX_KEYWORD_SCAN=25000`: ~30-60 seconds
   - With `MAX_KEYWORD_SCAN=50000`: ~60-120+ seconds
   - Progress updates shown every 2000 messages to indicate the bot is still working
   - Reduce `MAX_KEYWORD_SCAN` in `.env` for faster searches at the cost of less history coverage
-- **Analysis limit**: Analyzes up to `MAX_MESSAGES_ANALYZED` most recent messages (default: 500)
+- **Analysis limit**: Only the most recent `MAX_MESSAGES_ANALYZED` messages are sent to Grok (default: 500)
   - Increase for deeper analysis: `MAX_MESSAGES_ANALYZED=1000` or even higher
   - 100 msgs ≈ $0.002-0.005, 500 msgs ≈ $0.01-0.025, 1000 msgs ≈ $0.02-0.05
+  - This is the actual limit on what Grok sees, not what we scan
 - **Message length**: Each message truncated to 300 characters in analysis
 - **Bot filtering**: Bot messages excluded from channel-wide searches
 - **Response splitting**: Automatic splitting for long responses with citation preservation

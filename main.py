@@ -54,6 +54,50 @@ search_context = {}  # {channel_id: {user_id: {searched_user: User, messages: [.
 # Track conversation history for context awareness
 conversation_history = {}  # {channel_id: {user_id: [{"role": "user/assistant", "content": str}]}}
 
+def convert_usernames_to_mentions(text: str, guild: discord.Guild) -> str:
+    """
+    Convert Discord usernames in text to proper mentions.
+    Handles patterns like: username, @username, "username"
+    """
+    if not guild:
+        return text
+    
+    # Get all members in the guild
+    members = guild.members
+    
+    # Create a mapping of lowercase usernames/display names to member objects
+    username_map = {}
+    for member in members:
+        # Map both username and display name (case-insensitive)
+        username_map[member.name.lower()] = member
+        username_map[member.display_name.lower()] = member
+        # Also map without discriminator if present
+        if '#' in member.name:
+            base_name = member.name.split('#')[0].lower()
+            username_map[base_name] = member
+    
+    # Pattern to match potential usernames
+    # Matches: @username, "username", username (with word boundaries)
+    # But avoid matching if already in a mention format <@123456>
+    patterns_to_try = [
+        # Match @username (but not already formatted mentions)
+        (r'(?<!<)@([a-zA-Z0-9_]{2,32})(?!>)', lambda m: f"<@{username_map[m.group(1).lower()].id}>" if m.group(1).lower() in username_map else m.group(0)),
+        # Match "username" in quotes
+        (r'"([a-zA-Z0-9_]{2,32})"', lambda m: f"<@{username_map[m.group(1).lower()].id}>" if m.group(1).lower() in username_map else m.group(0)),
+        # Match username at word boundaries (but be conservative - only at start of sentence or after punctuation)
+        (r'(?<=\s)([A-Z][a-zA-Z0-9_]{1,31})(?=[\s,.\'])', lambda m: f"<@{username_map[m.group(1).lower()].id}>" if m.group(1).lower() in username_map else m.group(0)),
+    ]
+    
+    result = text
+    for pattern, replacement in patterns_to_try:
+        try:
+            result = re.sub(pattern, replacement, result)
+        except Exception as e:
+            logger.warning(f'Error applying username pattern {pattern}: {e}')
+            continue
+    
+    return result
+
 @bot.event
 async def on_ready():
     logger.info(f'Bot logged in as {bot.user} (ID: {bot.user.id})')
@@ -132,12 +176,14 @@ async def search_history(ctx, *, query_text: str):
         last_update = 0
         
         # For keyword filtering, scan much more to find filtered results
-        # Otherwise just scan a bit more than the limit
+        # For general searches, only scan what we can send to Grok
         if keyword_filter:
             # Scan up to MAX_KEYWORD_SCAN messages for keyword searches
             max_scan = MAX_KEYWORD_SCAN
         else:
-            max_scan = limit + 100
+            # For non-keyword searches, we'll send all results to Grok anyway
+            # So only scan up to MAX_MESSAGES_ANALYZED (no point scanning more)
+            max_scan = MAX_MESSAGES_ANALYZED
         
         # Pre-compute lowercase keyword for faster comparison
         keyword_lower = keyword_filter.lower() if keyword_filter else None
@@ -263,14 +309,27 @@ async def search_history(ctx, *, query_text: str):
             
             response = completion.choices[0].message.content
             
-            # Clean up malformed citations (e.g., #248(⁠post-election-year-hate-dome⁠) -> [#248])
+            # Clean up malformed citations (e.g., #248(⁠post-election-year-hate-dome⁠) -> #248)
+            # First, remove channel names from citations
             malformed_citation_pattern = r'#(\d+)\([^)]*\)'
-            response = re.sub(malformed_citation_pattern, r'[#\1]', response)
+            response = re.sub(malformed_citation_pattern, r'#\1', response)
+            
+            # Now convert citations to bracketed format
+            # First handle ranges like #140-#141-#142 or #727-#1000 -> [#140-#141-#142]
+            # The pattern matches: #<num>-#<num> or #<num>-<num>-#<num> etc.
+            # Must not already be inside brackets
+            range_bare_pattern = r'(?<!\[)#(\d+(?:-#?\d+)+)(?!\])'
+            response = re.sub(range_bare_pattern, r'[#\1]', response)
+            
+            # Then handle individual citations #N -> [#N]
+            # Must not be: already in brackets, followed by dash (part of range), or followed by ]
+            bare_citation_pattern = r'(?<!\[)#(\d+)(?![\d\-\)\]])'
+            response = re.sub(bare_citation_pattern, r'[#\1]', response)
             
             # Parse citations from response and extract referenced message numbers
             # Match both individual citations [#N] and ranges [#N-#M], [#N]-[#M], [#N-M]
             citation_pattern = r'\[#(\d+)\]'
-            range_pattern = r'\[#(\d+)(?:-#?|(?:\]-?\[?#?))(\d+)\]'  # Matches [#88-#90], [#88]-[#90], [#88-90]
+            range_pattern = r'\[#(\d+)-#?(\d+)\]'  # Matches [#497-502], [#88-#90]
             
             # Find individual citations (but not those that are part of ranges)
             cited_numbers = set()
@@ -344,6 +403,9 @@ async def search_history(ctx, *, query_text: str):
                 return f"<{animated}:{emoji_name}:{emoji_id}>"
             
             response = re.sub(emoji_pattern, render_emoji, response)
+            
+            # Convert Discord usernames to mentions
+            response = convert_usernames_to_mentions(response, ctx.guild)
             
             # Calculate cost
             request_cost = 0
@@ -489,16 +551,13 @@ async def search_history(ctx, *, query_text: str):
                         icon_url="https://pbs.twimg.com/profile_images/1683899100922511378/5lY42eHs_400x400.jpg"
                     )
                     
-                    # Add fields only to first embed
-                    if i == 0:
+                    # Add fields and footer only to last embed
+                    if i == len(chunks) - 1:
                         embed.add_field(
                             name="Query",
                             value=query[:1024],
                             inline=False
                         )
-                    
-                    # Add footer and follow-up only to last embed
-                    if i == len(chunks) - 1:
                         embed.add_field(
                             name="💡 Follow-up",
                             value="Reply to this message to ask more questions about this user's history",
@@ -572,8 +631,9 @@ async def should_search_discord_history(message_content, has_mentions):
     discord_scope_keywords = [
         "here", "in here", "this channel", "this server", 
         "on this server", "in this chat", "in chat",
-        "this discord", "on this discord", "in this discord",
-        "of this discord", "of this server", "of this channel"
+        "this discord", "on this discord", "in this discord", "in the discord", "in discord",
+        "of this discord", "of this server", "of this channel",
+        "the discord", "the server", "the channel"
     ]
     if any(scope in content_lower for scope in discord_scope_keywords):
         logger.info('Discord search detected: explicit scope keyword')
@@ -657,20 +717,24 @@ async def should_search_discord_history(message_content, has_mentions):
         return False, None, None
 
 def extract_time_period(content_lower):
-    """Extract time period in number of messages to scan"""
-    # Map time periods to approximate message counts
-    time_mappings = {
-        r'past\s*month|last\s*month|30\s*days': 5000,
-        r'past\s*week|last\s*week|7\s*days': 2000,
-        r'past\s*day|last\s*day|24\s*hours|today': 500,
-        r'past\s*year|last\s*year': 10000,
-        r'recently': 1000,
-    }
+    """
+    Check if query mentions a time period.
+    Returns DEFAULT_SEARCH_LIMIT if time period mentioned, None otherwise.
+    Note: We don't try to map time periods to message counts since Discord 
+    activity varies wildly - use DEFAULT_SEARCH_LIMIT for all temporal queries.
+    """
+    time_patterns = [
+        r'past\s*month|last\s*month|30\s*days',
+        r'past\s*week|last\s*week|7\s*days',
+        r'past\s*day|last\s*day|24\s*hours|today',
+        r'past\s*year|last\s*year',
+        r'recently',
+    ]
     
-    for pattern, limit in time_mappings.items():
+    for pattern in time_patterns:
         if re.search(pattern, content_lower):
-            logger.debug(f'Time period extracted: {limit} messages')
-            return limit
+            logger.debug(f'Time period mentioned, using DEFAULT_SEARCH_LIMIT')
+            return DEFAULT_SEARCH_LIMIT
     
     return None  # No time period specified
 
@@ -748,24 +812,31 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
         keywords: Optional keyword to pre-filter messages
         target_user: Optional user to search (if mentioned)
     """
-    # Use default time limit if not specified
-    if time_limit is None:
-        time_limit = DEFAULT_SEARCH_LIMIT
-    
     # Determine if we should use keyword filtering
     use_keyword_filter = keywords is not None
+    
+    # Determine scan limit based on whether we have keyword filter
+    if use_keyword_filter:
+        # For keyword searches, scan more to find enough matching messages
+        if time_limit is None:
+            time_limit = DEFAULT_SEARCH_LIMIT
+        max_scan = min(time_limit, MAX_KEYWORD_SCAN)
+    else:
+        # For general searches, only scan what we can send to Grok
+        max_scan = MAX_MESSAGES_ANALYZED
+        time_limit = max_scan
     
     # Send searching message
     if target_user:
         if use_keyword_filter:
             searching_msg = await message.reply(f"🔍 Analyzing {target_user.mention}'s messages about `{keywords}` (scanning up to {time_limit:,} messages)...")
         else:
-            searching_msg = await message.reply(f"🔍 Analyzing {target_user.mention}'s message history (last {time_limit:,} messages)...")
+            searching_msg = await message.reply(f"🔍 Analyzing {target_user.mention}'s message history (last {max_scan:,} messages)...")
     else:
         if use_keyword_filter:
             searching_msg = await message.reply(f"🔍 Analyzing channel messages about `{keywords}` (scanning up to {time_limit:,} messages)...")
         else:
-            searching_msg = await message.reply(f"🔍 Analyzing channel message history (last {time_limit:,} messages)...")
+            searching_msg = await message.reply(f"🔍 Analyzing channel message history (last {max_scan:,} messages)...")
     
     try:
         # Collect messages
@@ -773,7 +844,7 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
         messages_scanned = 0
         last_update = 0
         
-        async for msg in message.channel.history(limit=min(time_limit, MAX_KEYWORD_SCAN)):
+        async for msg in message.channel.history(limit=max_scan):
             # Skip the command message
             if msg.id == message.id:
                 continue
@@ -854,14 +925,26 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
             completion = client.chat.completions.create(**request_params)
             response = completion.choices[0].message.content
             
-            # Clean up malformed citations (e.g., #248(⁠post-election-year-hate-dome⁠) -> [#248])
-            # First, find citations with extra junk and normalize them
+            # Clean up malformed citations (e.g., #248(⁠post-election-year-hate-dome⁠) -> #248)
+            # First, remove channel names from citations
             malformed_citation_pattern = r'#(\d+)\([^)]*\)'
-            response = re.sub(malformed_citation_pattern, r'[#\1]', response)
+            response = re.sub(malformed_citation_pattern, r'#\1', response)
+            
+            # Now convert citations to bracketed format
+            # First handle ranges like #140-#141-#142 or #727-#1000 -> [#140-#141-#142]
+            # The pattern matches: #<num>-#<num> or #<num>-<num>-#<num> etc.
+            # Must not already be inside brackets
+            range_bare_pattern = r'(?<!\[)#(\d+(?:-#?\d+)+)(?!\])'
+            response = re.sub(range_bare_pattern, r'[#\1]', response)
+            
+            # Then handle individual citations #N -> [#N]
+            # Must not be: already in brackets, followed by dash (part of range), or followed by ]
+            bare_citation_pattern = r'(?<!\[)#(\d+)(?![\d\-\)\]])'
+            response = re.sub(bare_citation_pattern, r'[#\1]', response)
             
             # Process citations
             citation_pattern = r'\[#(\d+)\]'
-            range_pattern = r'\[#(\d+)(?:-#?|(?:\]-?\[?#?))(\d+)\]'  # Matches [#88-#90], [#88]-[#90], [#88-90]
+            range_pattern = r'\[#(\d+)-#?(\d+)\]'  # Matches [#497-502], [#88-#90]
             
             def replace_citation(match):
                 pos = match.start()
@@ -897,6 +980,9 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
             
             response = re.sub(range_pattern, replace_range, response)
             response = re.sub(citation_pattern, replace_citation, response)
+            
+            # Convert Discord usernames to mentions
+            response = convert_usernames_to_mentions(response, message.guild)
             
             # Calculate cost
             request_cost = 0
@@ -936,9 +1022,20 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
                     value=query[:1024],
                     inline=False
                 )
+                
+                analyzed_text = f"{messages_to_analyze} messages analyzed"
+                if len(collected_messages) > messages_to_analyze:
+                    analyzed_text += f" ({len(collected_messages)} found)"
+                
+                # Add oldest message date
+                if messages_for_context:
+                    oldest_msg = messages_for_context[-1]  # Last in list (reversed for chronological)
+                    oldest_date = oldest_msg.created_at.astimezone(TIMEZONE)
+                    analyzed_text += f"\nOldest: {oldest_date.strftime('%Y-%m-%d %H:%M %Z')}"
+                
                 embed.add_field(
                     name="Analyzed",
-                    value=f"{len(collected_messages)} messages total",
+                    value=analyzed_text,
                     inline=False
                 )
                 
@@ -1017,21 +1114,29 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
                         icon_url="https://pbs.twimg.com/profile_images/1683899100922511378/5lY42eHs_400x400.jpg"
                     )
                     
-                    # Add fields only to first embed
-                    if i == 0:
+                    # Add fields and footer only to last embed
+                    if i == len(chunks) - 1:
                         embed.add_field(
                             name="Query",
                             value=query[:1024],
                             inline=False
                         )
+                        
+                        analyzed_text = f"{messages_to_analyze} messages analyzed"
+                        if len(collected_messages) > messages_to_analyze:
+                            analyzed_text += f" ({len(collected_messages)} found)"
+                        
+                        # Add oldest message date
+                        if messages_for_context:
+                            oldest_msg = messages_for_context[-1]  # Last in list (reversed for chronological)
+                            oldest_date = oldest_msg.created_at.astimezone(TIMEZONE)
+                            analyzed_text += f"\nOldest: {oldest_date.strftime('%Y-%m-%d %H:%M %Z')}"
+                        
                         embed.add_field(
                             name="Analyzed",
-                            value=f"{len(collected_messages)} messages total",
+                            value=analyzed_text,
                             inline=False
                         )
-                    
-                    # Add footer only to last embed
-                    if i == len(chunks) - 1:
                         footer_text = f"Requested by {message.author.display_name}"
                         if usage_text:
                             footer_text += f" • {usage_text}"
@@ -1413,14 +1518,27 @@ async def on_message(message):
                 
                 # Process citations if this is a search follow-up with message_number_map
                 if is_search_followup and 'message_number_map' in locals():
-                    # Clean up malformed citations first
+                    # Clean up malformed citations (e.g., #248(⁠post-election-year-hate-dome⁠) -> #248)
+                    # First, remove channel names from citations
                     malformed_citation_pattern = r'#(\d+)\([^)]*\)'
-                    response = re.sub(malformed_citation_pattern, r'[#\1]', response)
+                    response = re.sub(malformed_citation_pattern, r'#\1', response)
+                    
+                    # Now convert citations to bracketed format
+                    # First handle ranges like #140-#141-#142 or #727-#1000 -> [#140-#141-#142]
+                    # The pattern matches: #<num>-#<num> or #<num>-<num>-#<num> etc.
+                    # Must not already be inside brackets
+                    range_bare_pattern = r'(?<!\[)#(\d+(?:-#?\d+)+)(?!\])'
+                    response = re.sub(range_bare_pattern, r'[#\1]', response)
+                    
+                    # Then handle individual citations #N -> [#N]
+                    # Must not be: already in brackets, followed by dash (part of range), or followed by ]
+                    bare_citation_pattern = r'(?<!\[)#(\d+)(?![\d\-\)\]])'
+                    response = re.sub(bare_citation_pattern, r'[#\1]', response)
                     
                     # Parse citations from response and extract referenced message numbers
-                    # Match both individual citations [#N] and ranges [#N-#M], [#N]-[#M], [#N-M]
+                    # Match both individual citations [#N] and ranges [#N-#M], [#N-M]
                     citation_pattern = r'\[#(\d+)\]'
-                    range_pattern = r'\[#(\d+)(?:-#?|(?:\]-?\[?#?))(\d+)\]'  # Matches [#88-#90], [#88]-[#90], [#88-90]
+                    range_pattern = r'\[#(\d+)-#?(\d+)\]'  # Matches [#497-502], [#88-#90]
                     
                     # Find individual citations (but not those that are part of ranges)
                     cited_numbers = set()
@@ -1494,11 +1612,14 @@ async def on_message(message):
                     response = re.sub(emoji_pattern, render_emoji, response)
                     logger.info(f'Processed citations and emojis in follow-up response')
                 
+                # Convert Discord usernames to mentions (do this before Twitter conversion)
+                response = convert_usernames_to_mentions(response, message.guild)
+                
                 # Convert Twitter/X usernames to clickable links
-                # Match @username patterns (not already in URLs)
-                twitter_pattern = r'(?<![:/\w])@([A-Za-z0-9_]{1,15})(?!\w)'
+                # Match @username patterns (not already in URLs or Discord mentions)
+                twitter_pattern = r'(?<![:/\w<])@([A-Za-z0-9_]{1,15})(?!>|\w)'
                 response = re.sub(twitter_pattern, r'[@\1](https://x.com/\1)', response)
-                logger.info(f'Converted Twitter mentions to links')
+                logger.info(f'Converted usernames and Twitter mentions')
                 
                 # Store conversation history (only for non-search, text-only conversations)
                 if is_replying_to_bot and not is_search_followup and not image_urls:

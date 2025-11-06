@@ -16,10 +16,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger('GrokBot')
 
-load_dotenv()
+# Load environment variables from .env file (looks in current directory)
+# In Docker, this will be /app/.env
+dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
+if os.path.exists(dotenv_path):
+    logger.info(f'Loading environment from {dotenv_path}')
+    load_dotenv(dotenv_path)
+else:
+    logger.info('.env file not found, using environment variables')
+    load_dotenv()  # Fallback to default behavior
 
 TOKEN = os.getenv('DISCORD_TOKEN')
 XAI_KEY = os.getenv('XAI_API_KEY')
+
+# Log if tokens are loaded (without revealing the actual values)
+if TOKEN:
+    logger.info(f'DISCORD_TOKEN loaded (length: {len(TOKEN)})')
+else:
+    logger.error('DISCORD_TOKEN not found in environment!')
+    
+if XAI_KEY:
+    logger.info(f'XAI_API_KEY loaded (length: {len(XAI_KEY)})')
+else:
+    logger.error('XAI_API_KEY not found in environment!')
 
 # Timezone for display (configurable, defaults to Central Time)
 TIMEZONE = pytz.timezone(os.getenv('TIMEZONE', 'America/Chicago'))
@@ -452,11 +471,6 @@ async def search_history(ctx, *, query_text: str):
                     icon_url="https://pbs.twimg.com/profile_images/1683899100922511378/5lY42eHs_400x400.jpg"
                 )
                 embed.add_field(
-                    name="Query",
-                    value=query[:1024],
-                    inline=False
-                )
-                embed.add_field(
                     name="💡 Follow-up",
                     value="Reply to this message to ask more questions about this user's history",
                     inline=False
@@ -553,11 +567,6 @@ async def search_history(ctx, *, query_text: str):
                     
                     # Add fields and footer only to last embed
                     if i == len(chunks) - 1:
-                        embed.add_field(
-                            name="Query",
-                            value=query[:1024],
-                            inline=False
-                        )
                         embed.add_field(
                             name="💡 Follow-up",
                             value="Reply to this message to ask more questions about this user's history",
@@ -1017,11 +1026,6 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
                     name="Grok Analysis",
                     icon_url="https://pbs.twimg.com/profile_images/1683899100922511378/5lY42eHs_400x400.jpg"
                 )
-                embed.add_field(
-                    name="Query",
-                    value=query[:1024],
-                    inline=False
-                )
                 
                 analyzed_text = f"{messages_to_analyze} messages analyzed"
                 if len(collected_messages) > messages_to_analyze:
@@ -1116,12 +1120,6 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
                     
                     # Add fields and footer only to last embed
                     if i == len(chunks) - 1:
-                        embed.add_field(
-                            name="Query",
-                            value=query[:1024],
-                            inline=False
-                        )
-                        
                         analyzed_text = f"{messages_to_analyze} messages analyzed"
                         if len(collected_messages) > messages_to_analyze:
                             analyzed_text += f" ({len(collected_messages)} found)"

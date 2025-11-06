@@ -245,7 +245,7 @@ async def search_history(ctx, *, query_text: str):
             
             logger.info(f'Found {len(cited_numbers)} cited messages: {sorted(cited_numbers)}')
             
-            # Replace ranges with individual linked citations
+            # Replace ranges with individual linked citations (compact format)
             def replace_range(match):
                 start_num = int(match.group(1))
                 end_num = int(match.group(2))
@@ -254,32 +254,34 @@ async def search_history(ctx, *, query_text: str):
                     if msg_num in message_number_map:
                         msg = message_number_map[msg_num]
                         msg_link = f"https://discord.com/channels/{ctx.guild.id}/{ctx.channel.id}/{msg.id}"
-                        timestamp = msg.created_at.strftime("%b %d, %H:%M")
-                        links.append(f"[[#{msg_num}]]({msg_link} '{timestamp}')")
+                        links.append(f"[#{msg_num}]({msg_link})")
                     else:
                         links.append(f"[#{msg_num}]")
                 return "-".join(links) if links else match.group(0)
             
-            # Replace individual citations with Discord message links (not part of ranges)
+            # Replace individual citations with Discord message links (not part of ranges, compact format)
             def replace_citation(match):
-                # Check if this citation is part of a range by looking at context
-                full_match = match.group(0)
+                # Skip if already a markdown link (check if followed by ]( )
                 pos = match.start()
-                # Check what comes after the match
                 after_pos = match.end()
+                
+                # Check if this is already inside a markdown link
+                if after_pos < len(response) - 2 and response[after_pos:after_pos+2] == '](':
+                    return match.group(0)  # Already linked, skip
+                
+                # Check if this citation is part of a range by looking at context
                 if after_pos < len(response) and response[after_pos:after_pos+1] == '-':
-                    return full_match  # This is the start of a range, skip it
+                    return match.group(0)  # This is the start of a range, skip it
                 # Check what comes before
                 if pos > 0 and response[pos-1:pos] == '-':
-                    return full_match  # This is the end of a range, skip it
+                    return match.group(0)  # This is the end of a range, skip it
                     
                 msg_num = int(match.group(1))
                 if msg_num in message_number_map:
                     msg = message_number_map[msg_num]
                     msg_link = f"https://discord.com/channels/{ctx.guild.id}/{ctx.channel.id}/{msg.id}"
-                    timestamp = msg.created_at.strftime("%b %d, %H:%M")
-                    return f"[[#{msg_num}]]({msg_link} '{timestamp}')"
-                return full_match  # Keep original if not found
+                    return f"[#{msg_num}]({msg_link})"
+                return match.group(0)  # Keep original if not found
             
             # First replace ranges, then individual citations
             response = re.sub(range_pattern, replace_range, response)
@@ -411,6 +413,24 @@ async def search_history(ctx, *, query_text: str):
                 
                 logger.info(f'Search response split into {len(chunks)} embeds')
                 
+                # Helper function to calculate total embed size
+                def get_embed_size(embed):
+                    size = 0
+                    if embed.title:
+                        size += len(embed.title)
+                    if embed.description:
+                        size += len(embed.description)
+                    if embed.footer and embed.footer.text:
+                        size += len(embed.footer.text)
+                    if embed.author and embed.author.name:
+                        size += len(embed.author.name)
+                    for field in embed.fields:
+                        if field.name:
+                            size += len(field.name)
+                        if field.value:
+                            size += len(field.value)
+                    return size
+                
                 for i, chunk in enumerate(chunks):
                     embed = discord.Embed(
                         title=f"{title} (Part {i+1}/{len(chunks)})" if i > 0 else title,
@@ -442,6 +462,36 @@ async def search_history(ctx, *, query_text: str):
                         if usage_text:
                             footer_text += f" • {usage_text}"
                         embed.set_footer(text=footer_text, icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
+                    
+                    # Check if embed size exceeds limit (6000 chars total)
+                    embed_size = get_embed_size(embed)
+                    if embed_size > 5800:  # Leave some buffer
+                        # Need to split this chunk further
+                        logger.warning(f'Embed {i+1} size {embed_size} exceeds limit, splitting further')
+                        # Split description in half
+                        mid_point = len(chunk) // 2
+                        # Find a good break point (paragraph or sentence)
+                        break_point = chunk.rfind('\n\n', 0, mid_point)
+                        if break_point == -1:
+                            break_point = chunk.rfind('. ', 0, mid_point)
+                        if break_point == -1:
+                            break_point = chunk.rfind(' ', 0, mid_point)
+                        if break_point == -1:
+                            break_point = mid_point
+                        
+                        # Insert the second half back into chunks
+                        first_half = chunk[:break_point].rstrip()
+                        second_half = chunk[break_point:].lstrip()
+                        chunks[i] = first_half
+                        chunks.insert(i + 1, second_half)
+                        
+                        # Update embed with first half
+                        embed.description = first_half
+                        # Update title to reflect new total
+                        if i > 0:
+                            embed.title = f"{title} (Part {i+1}/{len(chunks)})"
+                        
+                        logger.info(f'Split embed into 2 parts, now have {len(chunks)} total chunks')
                     
                     await ctx.reply(embed=embed)
             
@@ -828,7 +878,7 @@ async def on_message(message):
                     
                     logger.info(f'Found {len(cited_numbers)} cited messages in follow-up: {sorted(cited_numbers)}')
                     
-                    # Replace ranges with individual linked citations
+                    # Replace ranges with individual linked citations (compact format)
                     def replace_range(match):
                         start_num = int(match.group(1))
                         end_num = int(match.group(2))
@@ -837,32 +887,34 @@ async def on_message(message):
                             if msg_num in message_number_map:
                                 msg = message_number_map[msg_num]
                                 msg_link = f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{msg.id}"
-                                timestamp = msg.created_at.strftime("%b %d, %H:%M")
-                                links.append(f"[[#{msg_num}]]({msg_link} '{timestamp}')")
+                                links.append(f"[#{msg_num}]({msg_link})")
                             else:
                                 links.append(f"[#{msg_num}]")
                         return "-".join(links) if links else match.group(0)
                     
-                    # Replace individual citations with Discord message links (not part of ranges)
+                    # Replace individual citations with Discord message links (not part of ranges, compact format)
                     def replace_citation(match):
-                        # Check if this citation is part of a range by looking at context
-                        full_match = match.group(0)
+                        # Skip if already a markdown link (check if followed by ]( )
                         pos = match.start()
-                        # Check what comes after the match
                         after_pos = match.end()
+                        
+                        # Check if this is already inside a markdown link
+                        if after_pos < len(response) - 2 and response[after_pos:after_pos+2] == '](':
+                            return match.group(0)  # Already linked, skip
+                        
+                        # Check if this citation is part of a range by looking at context
                         if after_pos < len(response) and response[after_pos:after_pos+1] == '-':
-                            return full_match  # This is the start of a range, skip it
+                            return match.group(0)  # This is the start of a range, skip it
                         # Check what comes before
                         if pos > 0 and response[pos-1:pos] == '-':
-                            return full_match  # This is the end of a range, skip it
+                            return match.group(0)  # This is the end of a range, skip it
                             
                         msg_num = int(match.group(1))
                         if msg_num in message_number_map:
                             msg = message_number_map[msg_num]
                             msg_link = f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{msg.id}"
-                            timestamp = msg.created_at.strftime("%b %d, %H:%M")
-                            return f"[[#{msg_num}]]({msg_link} '{timestamp}')"
-                        return full_match  # Keep original if not found
+                            return f"[#{msg_num}]({msg_link})"
+                        return match.group(0)  # Keep original if not found
                     
                     # First replace ranges, then individual citations
                     response = re.sub(range_pattern, replace_range, response)

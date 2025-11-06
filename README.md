@@ -21,7 +21,10 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with adva
   - Automatically detects when to search Discord vs. general questions
 - 🖼️ **Image Analysis**: Upload images or paste image URLs for vision analysis
 - 🔍 **Live Web Search**: Real-time web searches with automatic citations
-- 💬 **Conversation Memory**: Remembers context when you reply to Gronk
+- 💬 **Conversation Memory**: Persistent SQLite storage remembers full conversation threads
+  - Automatic cleanup of old conversations (configurable retention period)
+  - Survives bot restarts
+  - Thread-aware context tracking
 - 💵 **Cost Transparency**: Shows exact cost per request including search
 - 🌍 **Timezone Support**: Configurable timezone for accurate timestamps
 

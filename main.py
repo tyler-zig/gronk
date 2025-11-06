@@ -6,8 +6,10 @@ from dotenv import load_dotenv
 import logging
 import re
 from typing import Optional
-from datetime import timezone
+from datetime import timezone, datetime, timedelta
 import pytz
+import sqlite3
+import json
 
 # Set up logging
 logging.basicConfig(
@@ -70,8 +72,124 @@ bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
 # Track search context for follow-up queries
 search_context = {}  # {channel_id: {user_id: {searched_user: User, messages: [...], query: str}}}
 
-# Track conversation history for context awareness
-conversation_history = {}  # {channel_id: {user_id: [{"role": "user/assistant", "content": str}]}}
+# SQLite database for conversation history
+DB_PATH = os.getenv('CONVERSATION_DB_PATH', 'data/conversation_history.db')
+CONVERSATION_RETENTION_HOURS = int(os.getenv('CONVERSATION_RETENTION_HOURS', '24'))
+
+def init_conversation_db():
+    """Initialize SQLite database for conversation history"""
+    # Ensure data directory exists
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir)
+        logger.info(f'Created database directory: {db_dir}')
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Create conversations table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS conversations (
+            message_id INTEGER PRIMARY KEY,
+            channel_id INTEGER NOT NULL,
+            author_id INTEGER NOT NULL,
+            user_query TEXT NOT NULL,
+            bot_response TEXT NOT NULL,
+            model_used TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Create index for faster lookups
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_message_id ON conversations(message_id)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_created_at ON conversations(created_at)
+    ''')
+    
+    conn.commit()
+    conn.close()
+    logger.info(f'Conversation database initialized at {DB_PATH}')
+
+def store_conversation(message_id: int, channel_id: int, author_id: int, 
+                       user_query: str, bot_response: str, model_used: str):
+    """Store conversation in SQLite database"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO conversations 
+            (message_id, channel_id, author_id, user_query, bot_response, model_used)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (message_id, channel_id, author_id, user_query, bot_response, model_used))
+        
+        conn.commit()
+        conn.close()
+        logger.debug(f'Stored conversation for message {message_id}')
+    except Exception as e:
+        logger.error(f'Error storing conversation: {e}')
+
+def get_conversation(message_id: int) -> Optional[dict]:
+    """Retrieve conversation from SQLite database"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT author_id, user_query, bot_response, model_used, created_at
+            FROM conversations
+            WHERE message_id = ?
+        ''', (message_id,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                'author_id': row[0],
+                'user_query': row[1],
+                'bot_response': row[2],
+                'model_used': row[3],
+                'created_at': row[4]
+            }
+        return None
+    except Exception as e:
+        logger.error(f'Error retrieving conversation: {e}')
+        return None
+
+def cleanup_old_conversations():
+    """Remove conversations older than CONVERSATION_RETENTION_HOURS"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cutoff_time = datetime.now() - timedelta(hours=CONVERSATION_RETENTION_HOURS)
+        
+        cursor.execute('''
+            DELETE FROM conversations
+            WHERE created_at < ?
+        ''', (cutoff_time,))
+        
+        deleted_count = cursor.rowcount
+        conn.commit()
+        conn.close()
+        
+        if deleted_count > 0:
+            logger.info(f'Cleaned up {deleted_count} old conversations (older than {CONVERSATION_RETENTION_HOURS}h)')
+    except Exception as e:
+        logger.error(f'Error cleaning up conversations: {e}')
+
+async def periodic_cleanup():
+    """Periodically clean up old conversations"""
+    import asyncio
+    while True:
+        await asyncio.sleep(6 * 3600)  # Sleep for 6 hours
+        cleanup_old_conversations()
+
+# Initialize database on startup
+init_conversation_db()
 
 def convert_usernames_to_mentions(text: str, guild: discord.Guild) -> str:
     """
@@ -121,6 +239,12 @@ def convert_usernames_to_mentions(text: str, guild: discord.Guild) -> str:
 async def on_ready():
     logger.info(f'Bot logged in as {bot.user} (ID: {bot.user.id})')
     logger.info(f'Connected to {len(bot.guilds)} server(s)')
+    
+    # Clean up old conversations on startup
+    cleanup_old_conversations()
+    
+    # Schedule periodic cleanup (every 6 hours)
+    bot.loop.create_task(periodic_cleanup())
 
 @bot.command(name='search')
 async def search_history(ctx, *, query_text: str):
@@ -301,7 +425,13 @@ async def search_history(ctx, *, query_text: str):
                 context_parts.append(f"[{i}] [{timestamp_str}] {author_name}: {content}")
         
         context_parts.append(f"\n\nBased on these messages, {query}")
-        context_parts.append("\n\nIMPORTANT: When citing messages, use EXACTLY this format: [#N] where N is the message number. For example: [#5] or [#12]. Do NOT add any extra text or context inside the brackets. Multiple citations should look like: [#3], [#7], and [#12]. Ranges should look like: [#5-#10] (hyphen with no spaces).")
+        context_parts.append("\n\nIMPORTANT CITATION GUIDELINES:")
+        context_parts.append("- Cite key messages that support your main points (aim for 3-6 total citations)")
+        context_parts.append("- Be selective - don't cite every message, but DO cite your evidence")
+        context_parts.append("- NEVER use ranges like [#5-#10] - only cite individual messages: [#5], [#7], [#10]")
+        context_parts.append("- Use EXACTLY this format: [#N] where N is the message number")
+        context_parts.append("- Examples: [#5] or [#12]. Multiple: [#3], [#7], and [#12]")
+        context_parts.append("- Do NOT add any extra text or context inside the brackets")
         context_parts.append("\n\nNote: Custom Discord emojis appear as <:emoji_name:emoji_id>. When quoting messages with emojis, preserve this exact format.")
         tz_name = TIMEZONE.zone  # e.g., "America/Chicago"
         context_parts.append(f"\n\nNote: All timestamps are in {tz_name} timezone.")
@@ -912,7 +1042,13 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
                 context_parts.append(f"[{i}] [{timestamp_str}] {author_name}: {content}")
         
         context_parts.append(f"\n\nBased on these messages, answer: {query}")
-        context_parts.append("\n\nIMPORTANT: When citing messages, use EXACTLY this format: [#N] where N is the message number. For example: [#5] or [#12]. Do NOT add any extra text or context inside the brackets. Multiple citations should look like: [#3], [#7], and [#12]. Ranges should look like: [#5-#10] (hyphen with no spaces).")
+        context_parts.append("\n\nIMPORTANT CITATION GUIDELINES:")
+        context_parts.append("- Cite key messages that support your main points (aim for 3-6 total citations)")
+        context_parts.append("- Be selective - don't cite every message, but DO cite your evidence")
+        context_parts.append("- NEVER use ranges like [#5-#10] - only cite individual messages: [#5], [#7], [#10]")
+        context_parts.append("- Use EXACTLY this format: [#N] where N is the message number")
+        context_parts.append("- Examples: [#5] or [#12]. Multiple: [#3], [#7], and [#12]")
+        context_parts.append("- Do NOT add any extra text or context inside the brackets")
         context_parts.append(f"\n\nNote: All timestamps are in {TIMEZONE.zone} timezone.")
         full_prompt = "\n".join(context_parts)
         
@@ -1233,43 +1369,63 @@ async def on_message(message):
                             context_parts.append(f"[{i}] [{timestamp_str}] {content}")
                         
                         context_parts.append(f"\n\nAnswer this follow-up question: {prompt}")
-                        context_parts.append("\n\nIMPORTANT: When citing messages, use EXACTLY this format: [#N] where N is the message number. For example: [#5] or [#12]. Do NOT add any extra text or context inside the brackets. Multiple citations should look like: [#3], [#7], and [#12]. Ranges should look like: [#5-#10] (hyphen with no spaces).")
+                        context_parts.append("\n\nIMPORTANT CITATION GUIDELINES:")
+                        context_parts.append("- Cite key messages that support your main points (aim for 3-6 total citations)")
+                        context_parts.append("- Be selective - don't cite every message, but DO cite your evidence")
+                        context_parts.append("- NEVER use ranges like [#5-#10] - only cite individual messages: [#5], [#7], [#10]")
+                        context_parts.append("- Use EXACTLY this format: [#N] where N is the message number")
+                        context_parts.append("- Examples: [#5] or [#12]. Multiple: [#3], [#7], and [#12]")
+                        context_parts.append("- Do NOT add any extra text or context inside the brackets")
                         context_parts.append("\n\nNote: Custom Discord emojis appear as <:emoji_name:emoji_id>. When quoting messages with emojis, preserve this exact format.")
                         tz_name = TIMEZONE.zone
                         context_parts.append(f"\n\nNote: All timestamps are in {tz_name} timezone.")
                         prompt = "\n".join(context_parts)
                         logger.info(f'Built search follow-up context with {len(user_messages)} messages')
                 
-                # Check if we have conversation history with this message
-                elif replied_msg.id in conversation_history:
-                    logger.info('Detected conversation follow-up with history')
-                    prev_conv = conversation_history[replied_msg.id]
-                    
-                    # Build conversation history for context
-                    conversation_context = [
-                        {"role": "user", "content": prev_conv['user_query']},
-                        {"role": "assistant", "content": prev_conv['bot_response']},
-                        {"role": "user", "content": prompt}
-                    ]
-                    logger.info('Built conversation context with previous exchange')
             except Exception as e:
                 logger.warning(f'Error fetching conversation context: {e}')
         
-        # Get conversation history for this user (if replying to bot)
+        # Get conversation history based on the thread being replied to
+        # This will traverse the reply chain to build full conversation context
         conversation_messages = []
         use_conversation_history = False
+        replied_msg_id = None
+        
         if is_replying_to_bot and not is_search_followup:
-            # Initialize conversation history for this channel/user if needed
-            if message.channel.id not in conversation_history:
-                conversation_history[message.channel.id] = {}
-            if message.author.id not in conversation_history[message.channel.id]:
-                conversation_history[message.channel.id][message.author.id] = []
-            
-            # Get last 5 exchanges (10 messages max) to keep context window reasonable
-            conversation_messages = conversation_history[message.channel.id][message.author.id][-10:]
-            if conversation_messages:
-                use_conversation_history = True
-                logger.info(f'Using conversation history mode with {len(conversation_messages)} previous messages')
+            try:
+                # Traverse the entire reply chain to build full conversation history
+                reply_chain = []
+                current_message = message
+                max_depth = 10
+                depth = 0
+                
+                # Walk backwards through the reply chain
+                while current_message.reference and depth < max_depth:
+                    try:
+                        replied_message = await message.channel.fetch_message(current_message.reference.message_id)
+                        reply_chain.insert(0, replied_message)
+                        current_message = replied_message
+                        depth += 1
+                    except:
+                        break
+                
+                logger.info(f'Found {len(reply_chain)} messages in bot reply chain')
+                
+                # Build conversation messages from the reply chain
+                for msg in reply_chain:
+                    conv = get_conversation(msg.id)
+                    if conv:
+                        # Add the user query and bot response
+                        conversation_messages.append({"role": "user", "content": conv['user_query']})
+                        conversation_messages.append({"role": "assistant", "content": conv['bot_response']})
+                
+                if conversation_messages:
+                    use_conversation_history = True
+                    logger.info(f'Built conversation history with {len(conversation_messages)} messages from reply chain')
+                else:
+                    logger.info(f'No conversation history found in reply chain')
+            except Exception as e:
+                logger.warning(f'Error building conversation thread: {e}')
         logger.info(f'Extracted prompt: "{prompt}"')
         
         # Helper function to check if URL is a supported image type
@@ -1619,20 +1775,7 @@ async def on_message(message):
                 response = re.sub(twitter_pattern, r'[@\1](https://x.com/\1)', response)
                 logger.info(f'Converted usernames and Twitter mentions')
                 
-                # Store conversation history (only for non-search, text-only conversations)
-                if is_replying_to_bot and not is_search_followup and not image_urls:
-                    if message.channel.id not in conversation_history:
-                        conversation_history[message.channel.id] = {}
-                    if message.author.id not in conversation_history[message.channel.id]:
-                        conversation_history[message.channel.id][message.author.id] = []
-                    
-                    # Add user message and assistant response
-                    conversation_history[message.channel.id][message.author.id].append({"role": "user", "content": prompt})
-                    conversation_history[message.channel.id][message.author.id].append({"role": "assistant", "content": response})
-                    
-                    # Keep only last 20 messages (10 exchanges)
-                    conversation_history[message.channel.id][message.author.id] = conversation_history[message.channel.id][message.author.id][-20:]
-                    logger.info(f'Stored conversation history ({len(conversation_history[message.channel.id][message.author.id])} messages)')
+                # No need to store conversation history here anymore - we'll do it below per message
                 
                 # Track token usage and calculate cost
                 request_cost = 0
@@ -1704,14 +1847,20 @@ async def on_message(message):
                     # Send reply and store in conversation history
                     bot_message = await message.reply(embed=embed)
                     
-                    # Store conversation for future context (keep original user prompt, not the full context)
+                    # Store conversation for future context
+                    # Extract the original user prompt (without mentions)
                     original_prompt = message.content.replace(f'<@{bot.user.id}>', '').replace(f'<@!{bot.user.id}>', '').strip()
-                    conversation_history[bot_message.id] = {
-                        'user_query': original_prompt,
-                        'bot_response': response,
-                        'model_used': model
-                    }
-                    logger.info(f'Stored conversation history for message {bot_message.id}')
+                    
+                    # Store this response in SQLite so it can be referenced in future replies
+                    store_conversation(
+                        message_id=bot_message.id,
+                        channel_id=message.channel.id,
+                        author_id=message.author.id,
+                        user_query=original_prompt,
+                        bot_response=response,
+                        model_used=model
+                    )
+                    logger.info(f'Stored conversation history for bot message {bot_message.id} (asked by user {message.author.id})')
                 else:
                     # Split into multiple embeds if response is too long
                     chunks = [response[i:i+4096] for i in range(0, len(response), 4096)]
@@ -1742,12 +1891,15 @@ async def on_message(message):
                     # Store conversation for future context
                     if bot_message:
                         original_prompt = message.content.replace(f'<@{bot.user.id}>', '').replace(f'<@!{bot.user.id}>', '').strip()
-                        conversation_history[bot_message.id] = {
-                            'user_query': original_prompt,
-                            'bot_response': response,
-                            'model_used': model
-                        }
-                        logger.info(f'Stored conversation history for message {bot_message.id}')
+                        store_conversation(
+                            message_id=bot_message.id,
+                            channel_id=message.channel.id,
+                            author_id=message.author.id,
+                            user_query=original_prompt,
+                            bot_response=response,
+                            model_used=model
+                        )
+                        logger.info(f'Stored conversation history for bot message {bot_message.id} (asked by user {message.author.id})')
                 
                 logger.info('Response sent successfully')
         except Exception as e:

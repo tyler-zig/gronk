@@ -41,6 +41,16 @@ Thumbs.db
 # Logs
 *.log
 
+# Database files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Data directory contents (but keep the directory itself)
+data/*
+!data/.gitkeep
+
 # Test files
 test_*.py
 .env2

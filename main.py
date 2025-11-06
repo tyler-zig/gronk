@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 import logging
 import re
 from typing import Optional
+from datetime import timezone
+import pytz
 
 # Set up logging
 logging.basicConfig(
@@ -18,6 +20,9 @@ load_dotenv()
 
 TOKEN = os.getenv('DISCORD_TOKEN')
 XAI_KEY = os.getenv('XAI_API_KEY')
+
+# Timezone for display (configurable, defaults to Central Time)
+TIMEZONE = pytz.timezone(os.getenv('TIMEZONE', 'America/Chicago'))
 
 # Model configuration (with defaults)
 GROK_TEXT_MODEL = os.getenv('GROK_TEXT_MODEL', 'grok-4-fast')
@@ -109,12 +114,19 @@ async def search_history(ctx, *, query_text: str):
         searching_msg = await ctx.reply(f"🔍 Searching channel message history (last {limit} messages)...")
     
     try:
-        # Collect messages
+        # Collect messages (history returns newest first)
         collected_messages = []
         messages_scanned = 0
         
-        async for msg in ctx.channel.history(limit=limit * 3 if keyword_filter else limit):
+        # Increase scan limit for keyword filtering to ensure we get enough messages
+        scan_limit = limit * 3 if keyword_filter else limit + 100
+        
+        async for msg in ctx.channel.history(limit=scan_limit):
             messages_scanned += 1
+            
+            # Skip the search command itself
+            if msg.id == ctx.message.id:
+                continue
             
             # Apply keyword filter first if specified
             if keyword_filter and keyword_filter not in msg.content.lower():
@@ -129,8 +141,8 @@ async def search_history(ctx, *, query_text: str):
                 if not msg.author.bot:
                     collected_messages.append(msg)
             
-            # Stop if we have enough filtered messages
-            if keyword_filter and len(collected_messages) >= limit:
+            # Stop if we have enough messages
+            if len(collected_messages) >= limit:
                 break
         
         if not collected_messages:
@@ -155,22 +167,37 @@ async def search_history(ctx, *, query_text: str):
         }
         
         # Build context for Grok (use up to 100 messages to stay within token limits)
+        # Since collected_messages is in reverse chronological order (newest first),
+        # we take the first N messages (most recent) and then reverse them for chronological order
         messages_to_analyze = min(len(collected_messages), 100)
-        if target_user:
-            context_parts = [f"Search query: {query}\n\nUser {target_user.name}'s recent messages (showing {messages_to_analyze} of {len(collected_messages)} found):\n"]
-        else:
-            context_parts = [f"Search query: {query}\n\nChannel messages (showing {messages_to_analyze} of {len(collected_messages)} found):\n"]
+        messages_for_context = collected_messages[:messages_to_analyze]
         
-        for i, msg in enumerate(reversed(collected_messages[-messages_to_analyze:]), 1):
-            timestamp = msg.created_at.strftime("%Y-%m-%d %H:%M")
+        if target_user:
+            context_parts = [f"Search query: {query}\n\nUser {target_user.name}'s recent messages (showing {messages_to_analyze} of {len(collected_messages)} found, from oldest to newest):\n"]
+        else:
+            context_parts = [f"Search query: {query}\n\nChannel messages (showing {messages_to_analyze} of {len(collected_messages)} found, from oldest to newest):\n"]
+        
+        # Create a mapping of message numbers to message objects for later citation linking
+        # Reverse to show chronological order (oldest to newest)
+        message_number_map = {}
+        for i, msg in enumerate(reversed(messages_for_context), 1):
+            # Convert UTC timestamp to configured timezone
+            timestamp_local = msg.created_at.astimezone(TIMEZONE)
+            tz_abbr = timestamp_local.strftime("%Z")  # Get timezone abbreviation (CST, CDT, etc.)
+            timestamp_str = timestamp_local.strftime(f"%Y-%m-%d %H:%M {tz_abbr}")
             author_name = msg.author.name if not target_user else ""
             content = msg.content[:300] + "..." if len(msg.content) > 300 else msg.content
+            message_number_map[i] = msg  # Store mapping for later
             if target_user:
-                context_parts.append(f"[{i}] [{timestamp}] {content}")
+                context_parts.append(f"[{i}] [{timestamp_str}] {content}")
             else:
-                context_parts.append(f"[{i}] [{timestamp}] {author_name}: {content}")
+                context_parts.append(f"[{i}] [{timestamp_str}] {author_name}: {content}")
         
         context_parts.append(f"\n\nBased on these messages, {query}")
+        context_parts.append("\n\nIMPORTANT: When referencing specific messages in your answer, cite them using the format [#N] where N is the message number. For example: 'In message [#5], they mentioned...' or 'See messages [#3], [#7], and [#12] for examples.'")
+        context_parts.append("\n\nNote: Custom Discord emojis appear as <:emoji_name:emoji_id>. When quoting messages with emojis, preserve this exact format.")
+        tz_name = TIMEZONE.zone  # e.g., "America/Chicago"
+        context_parts.append(f"\n\nNote: All timestamps are in {tz_name} timezone.")
         full_prompt = "\n".join(context_parts)
         
         # Query Grok
@@ -193,6 +220,82 @@ async def search_history(ctx, *, query_text: str):
             completion = client.chat.completions.create(**request_params)
             
             response = completion.choices[0].message.content
+            
+            # Parse citations from response and extract referenced message numbers
+            # Match both individual citations [#N] and ranges [#N]-[M], [#N]-M, or [#N-M]
+            citation_pattern = r'\[#(\d+)\]'
+            range_pattern = r'\[#(\d+)(?:\]-?\[?|-)(\d+)\]?'  # Matches [#88]-[90], [#88]-90, or [#88-90]
+            
+            # Find individual citations (but not those that are part of ranges)
+            cited_numbers = set()
+            for match in re.finditer(citation_pattern, response):
+                # Check if this is part of a range by looking at context
+                pos = match.start()
+                # Skip if preceded by a range pattern
+                if pos > 0 and response[pos-1:pos] in ['-', ']']:
+                    continue
+                cited_numbers.add(int(match.group(1)))
+            
+            # Find and expand ranges
+            for match in re.finditer(range_pattern, response):
+                start_num = int(match.group(1))
+                end_num = int(match.group(2))
+                # Add all numbers in the range
+                cited_numbers.update(range(start_num, end_num + 1))
+            
+            logger.info(f'Found {len(cited_numbers)} cited messages: {sorted(cited_numbers)}')
+            
+            # Replace ranges with individual linked citations
+            def replace_range(match):
+                start_num = int(match.group(1))
+                end_num = int(match.group(2))
+                links = []
+                for msg_num in range(start_num, end_num + 1):
+                    if msg_num in message_number_map:
+                        msg = message_number_map[msg_num]
+                        msg_link = f"https://discord.com/channels/{ctx.guild.id}/{ctx.channel.id}/{msg.id}"
+                        timestamp = msg.created_at.strftime("%b %d, %H:%M")
+                        links.append(f"[[#{msg_num}]]({msg_link} '{timestamp}')")
+                    else:
+                        links.append(f"[#{msg_num}]")
+                return "-".join(links) if links else match.group(0)
+            
+            # Replace individual citations with Discord message links (not part of ranges)
+            def replace_citation(match):
+                # Check if this citation is part of a range by looking at context
+                full_match = match.group(0)
+                pos = match.start()
+                # Check what comes after the match
+                after_pos = match.end()
+                if after_pos < len(response) and response[after_pos:after_pos+1] == '-':
+                    return full_match  # This is the start of a range, skip it
+                # Check what comes before
+                if pos > 0 and response[pos-1:pos] == '-':
+                    return full_match  # This is the end of a range, skip it
+                    
+                msg_num = int(match.group(1))
+                if msg_num in message_number_map:
+                    msg = message_number_map[msg_num]
+                    msg_link = f"https://discord.com/channels/{ctx.guild.id}/{ctx.channel.id}/{msg.id}"
+                    timestamp = msg.created_at.strftime("%b %d, %H:%M")
+                    return f"[[#{msg_num}]]({msg_link} '{timestamp}')"
+                return full_match  # Keep original if not found
+            
+            # First replace ranges, then individual citations
+            response = re.sub(range_pattern, replace_range, response)
+            response = re.sub(citation_pattern, replace_citation, response)
+            
+            # Convert custom Discord emoji references to actual emoji format
+            # Pattern: <:emoji_name:emoji_id> or <a:emoji_name:emoji_id> for animated
+            emoji_pattern = r'<(a?):([^:]+):(\d+)>'
+            def render_emoji(match):
+                animated = match.group(1)
+                emoji_name = match.group(2)
+                emoji_id = match.group(3)
+                # Return proper Discord emoji format
+                return f"<{animated}:{emoji_name}:{emoji_id}>"
+            
+            response = re.sub(emoji_pattern, render_emoji, response)
             
             # Calculate cost
             request_cost = 0
@@ -217,67 +320,131 @@ async def search_history(ctx, *, query_text: str):
             else:
                 title = "🔍 Search Results: Channel History"
             
-            # Truncate response if too long for embed (6000 char total limit for entire embed)
-            # Description limit is 4096, but we need room for other fields
-            max_description_length = 3500
-            if len(response) > max_description_length:
-                response = response[:max_description_length] + "\n\n... *(response truncated due to length)*"
-            
-            embed = discord.Embed(
-                title=title,
-                description=response,
-                color=discord.Color.purple(),
-                timestamp=ctx.message.created_at
-            )
-            embed.set_author(
-                name="Grok Search",
-                icon_url="https://pbs.twimg.com/profile_images/1683899100922511378/5lY42eHs_400x400.jpg"
-            )
-            embed.add_field(
-                name="Query",
-                value=query[:1024],
-                inline=False
-            )
+            # Prepare additional fields
             messages_info = f"{len(collected_messages)} total (analyzed {messages_to_analyze})"
             if keyword_filter:
                 messages_info += f"\nFiltered by: `{keyword_filter}`"
+            if cited_numbers:
+                messages_info += f"\n{len(cited_numbers)} messages cited"
             
-            embed.add_field(
-                name="Messages Found",
-                value=messages_info,
-                inline=True
-            )
-            
-            # Add links to most recent messages
-            recent_links = []
-            for msg in collected_messages[:5]:  # Link to 5 most recent
-                msg_link = f"https://discord.com/channels/{ctx.guild.id}/{ctx.channel.id}/{msg.id}"
-                timestamp = msg.created_at.strftime("%b %d, %H:%M")
-                preview = msg.content[:50] + "..." if len(msg.content) > 50 else msg.content
-                if target_user:
-                    recent_links.append(f"[{timestamp}]({msg_link}): {preview}")
-                else:
-                    recent_links.append(f"[{timestamp}]({msg_link}) **{msg.author.name}**: {preview}")
-            
-            if recent_links:
+            # Split response into chunks if needed (4096 char limit per embed description)
+            # When splitting, ensure we don't break citations in the middle
+            if len(response) <= 4096:
+                # Single embed response
+                embed = discord.Embed(
+                    title=title,
+                    description=response,
+                    color=discord.Color.purple(),
+                    timestamp=ctx.message.created_at
+                )
+                embed.set_author(
+                    name="Grok Search",
+                    icon_url="https://pbs.twimg.com/profile_images/1683899100922511378/5lY42eHs_400x400.jpg"
+                )
                 embed.add_field(
-                    name="🔗 Recent Messages",
-                    value="\n".join(recent_links),
+                    name="Query",
+                    value=query[:1024],
                     inline=False
                 )
+                embed.add_field(
+                    name="💡 Follow-up",
+                    value="Reply to this message to ask more questions about this user's history",
+                    inline=False
+                )
+                footer_text = f"Requested by {ctx.author.display_name}"
+                if usage_text:
+                    footer_text += f" • {usage_text}"
+                embed.set_footer(text=footer_text, icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
+                
+                await ctx.reply(embed=embed)
+            else:
+                # Split into multiple embeds, but avoid breaking citations
+                chunks = []
+                current_chunk = ""
+                
+                # Split by sentences/paragraphs first to avoid breaking markdown links
+                paragraphs = response.split('\n\n')
+                
+                for para in paragraphs:
+                    # If adding this paragraph would exceed limit, start new chunk
+                    if len(current_chunk) + len(para) + 2 > 4096:  # +2 for \n\n
+                        if current_chunk:
+                            chunks.append(current_chunk.rstrip())
+                            current_chunk = para + '\n\n'
+                        else:
+                            # Paragraph itself is too long, need to split it more carefully
+                            sentences = para.split('. ')
+                            for sentence in sentences:
+                                if len(current_chunk) + len(sentence) + 2 > 4096:
+                                    if current_chunk:
+                                        chunks.append(current_chunk.rstrip())
+                                        current_chunk = sentence + '. '
+                                    else:
+                                        # Even a single sentence is too long, force split but try to avoid breaking links
+                                        # Find a safe break point (space not inside a markdown link)
+                                        safe_length = 4096
+                                        chunk_text = sentence[:safe_length]
+                                        
+                                        # Check if we're in the middle of a markdown link
+                                        last_bracket = chunk_text.rfind('[')
+                                        last_paren = chunk_text.rfind('(')
+                                        close_bracket = chunk_text.rfind(']')
+                                        close_paren = chunk_text.rfind(')')
+                                        
+                                        # If we have an open bracket/paren without close, find a safer break
+                                        if (last_bracket > close_bracket) or (last_paren > close_paren):
+                                            # Find last complete space before the link started
+                                            last_safe_space = chunk_text.rfind(' ', 0, last_bracket if last_bracket > last_paren else last_paren)
+                                            if last_safe_space > 0:
+                                                chunk_text = sentence[:last_safe_space]
+                                        
+                                        chunks.append(chunk_text)
+                                        current_chunk = sentence[len(chunk_text):] + '. '
+                                else:
+                                    current_chunk += sentence + '. '
+                    else:
+                        current_chunk += para + '\n\n'
+                
+                # Add remaining chunk
+                if current_chunk.strip():
+                    chunks.append(current_chunk.rstrip())
+                
+                logger.info(f'Search response split into {len(chunks)} embeds')
+                
+                for i, chunk in enumerate(chunks):
+                    embed = discord.Embed(
+                        title=f"{title} (Part {i+1}/{len(chunks)})" if i > 0 else title,
+                        description=chunk,
+                        color=discord.Color.purple(),
+                        timestamp=ctx.message.created_at
+                    )
+                    embed.set_author(
+                        name="Grok Search",
+                        icon_url="https://pbs.twimg.com/profile_images/1683899100922511378/5lY42eHs_400x400.jpg"
+                    )
+                    
+                    # Add fields only to first embed
+                    if i == 0:
+                        embed.add_field(
+                            name="Query",
+                            value=query[:1024],
+                            inline=False
+                        )
+                    
+                    # Add footer and follow-up only to last embed
+                    if i == len(chunks) - 1:
+                        embed.add_field(
+                            name="💡 Follow-up",
+                            value="Reply to this message to ask more questions about this user's history",
+                            inline=False
+                        )
+                        footer_text = f"Requested by {ctx.author.display_name}"
+                        if usage_text:
+                            footer_text += f" • {usage_text}"
+                        embed.set_footer(text=footer_text, icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
+                    
+                    await ctx.reply(embed=embed)
             
-            embed.add_field(
-                name="💡 Follow-up",
-                value="Reply to this message to ask more questions about this user's history",
-                inline=False
-            )
-            
-            footer_text = f"Requested by {ctx.author.display_name}"
-            if usage_text:
-                footer_text += f" • {usage_text}"
-            embed.set_footer(text=footer_text, icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
-            
-            await ctx.reply(embed=embed)
             logger.info(f'Search completed successfully')
             
     except Exception as e:
@@ -332,19 +499,32 @@ async def on_message(message):
                         searched_user = ctx_data['searched_user']
                         user_messages = ctx_data['messages']
                         
-                        # Build context with previous search data
+                        # Build context with previous search data (same as in search command)
                         messages_to_analyze = min(len(user_messages), 100)
+                        messages_for_context = user_messages[:messages_to_analyze]
+                        
+                        # Create message number mapping for citation linking
+                        message_number_map = {}
                         context_parts = [
-                            f"Previous search was about user {searched_user.name if searched_user else 'channel history'}.",
+                            f"Previous search was about {'user ' + searched_user.name if searched_user else 'channel history'}.",
                             f"Follow-up query: {prompt}\n",
-                            f"\n{'User ' + searched_user.name if searched_user else 'Channel'} messages (showing {messages_to_analyze} of {len(user_messages)} found):\n"
+                            f"\n{'User ' + searched_user.name if searched_user else 'Channel'} messages (showing {messages_to_analyze} of {len(user_messages)} found, from oldest to newest):\n"
                         ]
-                        for i, msg in enumerate(reversed(user_messages[-messages_to_analyze:]), 1):
-                            timestamp = msg.created_at.strftime("%Y-%m-%d %H:%M")
+                        
+                        for i, msg in enumerate(reversed(messages_for_context), 1):
+                            # Convert UTC timestamp to configured timezone
+                            timestamp_local = msg.created_at.astimezone(TIMEZONE)
+                            tz_abbr = timestamp_local.strftime("%Z")
+                            timestamp_str = timestamp_local.strftime(f"%Y-%m-%d %H:%M {tz_abbr}")
                             content = msg.content[:300] + "..." if len(msg.content) > 300 else msg.content
-                            context_parts.append(f"[{i}] [{timestamp}] {content}")
+                            message_number_map[i] = msg  # Store mapping for citation linking
+                            context_parts.append(f"[{i}] [{timestamp_str}] {content}")
                         
                         context_parts.append(f"\n\nAnswer this follow-up question: {prompt}")
+                        context_parts.append("\n\nIMPORTANT: When referencing specific messages in your answer, cite them using the format [#N] where N is the message number. For example: 'In message [#5], they mentioned...' or 'See messages [#3], [#7], and [#12] for examples.'")
+                        context_parts.append("\n\nNote: Custom Discord emojis appear as <:emoji_name:emoji_id>. When quoting messages with emojis, preserve this exact format.")
+                        tz_name = TIMEZONE.zone
+                        context_parts.append(f"\n\nNote: All timestamps are in {tz_name} timezone.")
                         prompt = "\n".join(context_parts)
                         logger.info(f'Built search follow-up context with {len(user_messages)} messages')
                 
@@ -622,6 +802,83 @@ async def on_message(message):
                 response = completion.choices[0].message.content
                 logger.info(f'Received response from Grok ({len(response)} characters)')
                 
+                # Process citations if this is a search follow-up with message_number_map
+                if is_search_followup and 'message_number_map' in locals():
+                    # Parse citations from response and extract referenced message numbers
+                    # Match both individual citations [#N] and ranges [#N]-[M], [#N]-M, or [#N-M]
+                    citation_pattern = r'\[#(\d+)\]'
+                    range_pattern = r'\[#(\d+)(?:\]-?\[?|-)(\d+)\]?'  # Matches [#88]-[90], [#88]-90, or [#88-90]
+                    
+                    # Find individual citations (but not those that are part of ranges)
+                    cited_numbers = set()
+                    for match in re.finditer(citation_pattern, response):
+                        # Check if this is part of a range by looking at context
+                        pos = match.start()
+                        # Skip if preceded by a range pattern
+                        if pos > 0 and response[pos-1:pos] in ['-', ']']:
+                            continue
+                        cited_numbers.add(int(match.group(1)))
+                    
+                    # Find and expand ranges
+                    for match in re.finditer(range_pattern, response):
+                        start_num = int(match.group(1))
+                        end_num = int(match.group(2))
+                        # Add all numbers in the range
+                        cited_numbers.update(range(start_num, end_num + 1))
+                    
+                    logger.info(f'Found {len(cited_numbers)} cited messages in follow-up: {sorted(cited_numbers)}')
+                    
+                    # Replace ranges with individual linked citations
+                    def replace_range(match):
+                        start_num = int(match.group(1))
+                        end_num = int(match.group(2))
+                        links = []
+                        for msg_num in range(start_num, end_num + 1):
+                            if msg_num in message_number_map:
+                                msg = message_number_map[msg_num]
+                                msg_link = f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{msg.id}"
+                                timestamp = msg.created_at.strftime("%b %d, %H:%M")
+                                links.append(f"[[#{msg_num}]]({msg_link} '{timestamp}')")
+                            else:
+                                links.append(f"[#{msg_num}]")
+                        return "-".join(links) if links else match.group(0)
+                    
+                    # Replace individual citations with Discord message links (not part of ranges)
+                    def replace_citation(match):
+                        # Check if this citation is part of a range by looking at context
+                        full_match = match.group(0)
+                        pos = match.start()
+                        # Check what comes after the match
+                        after_pos = match.end()
+                        if after_pos < len(response) and response[after_pos:after_pos+1] == '-':
+                            return full_match  # This is the start of a range, skip it
+                        # Check what comes before
+                        if pos > 0 and response[pos-1:pos] == '-':
+                            return full_match  # This is the end of a range, skip it
+                            
+                        msg_num = int(match.group(1))
+                        if msg_num in message_number_map:
+                            msg = message_number_map[msg_num]
+                            msg_link = f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{msg.id}"
+                            timestamp = msg.created_at.strftime("%b %d, %H:%M")
+                            return f"[[#{msg_num}]]({msg_link} '{timestamp}')"
+                        return full_match  # Keep original if not found
+                    
+                    # First replace ranges, then individual citations
+                    response = re.sub(range_pattern, replace_range, response)
+                    response = re.sub(citation_pattern, replace_citation, response)
+                    
+                    # Convert custom Discord emoji references to actual emoji format
+                    emoji_pattern = r'<(a?):([^:]+):(\d+)>'
+                    def render_emoji(match):
+                        animated = match.group(1)
+                        emoji_name = match.group(2)
+                        emoji_id = match.group(3)
+                        return f"<{animated}:{emoji_name}:{emoji_id}>"
+                    
+                    response = re.sub(emoji_pattern, render_emoji, response)
+                    logger.info(f'Processed citations and emojis in follow-up response')
+                
                 # Convert Twitter/X usernames to clickable links
                 # Match @username patterns (not already in URLs)
                 twitter_pattern = r'(?<![:/\w])@([A-Za-z0-9_]{1,15})(?!\w)'
@@ -650,10 +907,14 @@ async def on_message(message):
                 if hasattr(completion, 'usage') and completion.usage:
                     # Calculate token cost based on actual model used
                     model_used = completion.model
-                    if 'vision' in model_used.lower():
+                    is_vision = 'vision' in model_used.lower()
+                    vision_cost = 0
+                    
+                    if is_vision:
                         # Grok-vision pricing
                         input_cost = (completion.usage.prompt_tokens / 1_000_000) * GROK_VISION_INPUT_COST
                         output_cost = (completion.usage.completion_tokens / 1_000_000) * GROK_VISION_OUTPUT_COST
+                        vision_cost = input_cost + output_cost
                     else:
                         # Grok text model pricing
                         # Account for cached tokens if available
@@ -673,10 +934,19 @@ async def on_message(message):
                     
                     request_cost = input_cost + output_cost + search_cost
                     
+                    # Build usage text with vision and search cost breakdowns
+                    cost_str = f"💵 ${request_cost:.6f}"
+                    indicators = []
+                    
+                    if is_vision:
+                        indicators.append(f"👁️ ${vision_cost:.6f} vision")
                     if search_cost > 0:
-                        usage_text = f"💵 ${request_cost:.6f} (🔍 ${search_cost:.6f} search) • {completion.usage.prompt_tokens} in / {completion.usage.completion_tokens} out"
-                    else:
-                        usage_text = f"💵 ${request_cost:.6f} • {completion.usage.prompt_tokens} in / {completion.usage.completion_tokens} out"
+                        indicators.append(f"🔍 ${search_cost:.6f} search")
+                    
+                    if indicators:
+                        cost_str += f" ({', '.join(indicators)})"
+                    
+                    usage_text = f"{cost_str} • {completion.usage.prompt_tokens} in / {completion.usage.completion_tokens} out"
                     
                     logger.info(f"Token usage - Input: {completion.usage.prompt_tokens}, Output: {completion.usage.completion_tokens}, Search sources: {num_sources}, Total cost: ${request_cost:.6f}")
                 

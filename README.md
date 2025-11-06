@@ -14,10 +14,15 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with adva
   - Keyword filtering for targeted searches
   - Clickable citations linking directly to referenced messages
   - Real-time progress updates for large scans
+- 🧠 **Natural Language History Analysis**: Ask questions about Discord history naturally
+  - "who talks about Python the most in the past month?"
+  - "what have we discussed about AI recently?"
+  - "summarize our conversations from last week"
+  - Automatically detects when to search Discord vs. general questions
 - 🖼️ **Image Analysis**: Upload images or paste image URLs for vision analysis
 - 🔍 **Live Web Search**: Real-time web searches with automatic citations
 - 💬 **Conversation Memory**: Remembers context when you reply to Gronk
--  **Cost Transparency**: Shows exact cost per request including search
+- 💵 **Cost Transparency**: Shows exact cost per request including search
 - 🌍 **Timezone Support**: Configurable timezone for accurate timestamps
 
 ## Requirements
@@ -91,9 +96,9 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with adva
    # Search Configuration (Optional - defaults shown)
    ENABLE_WEB_SEARCH=true
    MAX_SEARCH_RESULTS=3
-   # Maximum messages to scan for keyword searches (default: 10000)
-   # Higher values = more thorough search but slower performance
    MAX_KEYWORD_SCAN=10000
+   MAX_MESSAGES_ANALYZED=500
+   ENABLE_NL_HISTORY_SEARCH=true
    
    # Pricing Configuration (Optional - defaults based on current xAI pricing)
    GROK_TEXT_INPUT_COST=0.20
@@ -103,12 +108,16 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with adva
    GROK_VISION_OUTPUT_COST=10.00
    GROK_SEARCH_COST=25.00
    ```
-   - **GROK_TEXT_MODEL**: Model used for text-only responses
-   - **GROK_VISION_MODEL**: Model used when analyzing images
-   - **TIMEZONE**: Timezone for message timestamps (defaults to Central Time)
-   - **ENABLE_WEB_SEARCH**: Enable/disable live web search (true/false)
-   - **MAX_SEARCH_RESULTS**: Number of web sources to fetch (1-10, higher = more cost)
-   - **MAX_KEYWORD_SCAN**: Maximum messages to scan for keyword searches (affects performance)
+   
+   **Configuration Options:**
+   - **GROK_TEXT_MODEL**: Model used for text-only responses (default: grok-4-fast)
+   - **GROK_VISION_MODEL**: Model used when analyzing images (default: grok-2-vision-1212)
+   - **TIMEZONE**: Timezone for message timestamps (default: America/Chicago)
+   - **ENABLE_WEB_SEARCH**: Enable/disable live web search (default: true)
+   - **MAX_SEARCH_RESULTS**: Number of web sources to fetch, 1-10 (default: 3, higher = more cost)
+   - **MAX_KEYWORD_SCAN**: Maximum messages to scan for keyword searches (default: 10,000)
+   - **MAX_MESSAGES_ANALYZED**: Maximum messages sent to Grok for analysis (default: 500, higher = better analysis but more cost)
+   - **ENABLE_NL_HISTORY_SEARCH**: Enable natural language history detection (default: true)
    - **Pricing variables**: Cost per 1M tokens (text/vision input/output, cached) and per 1K search sources
 
 ### 5. Install and Run
@@ -131,9 +140,44 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with adva
 - **Upload images**: Attach images or paste image URLs for visual analysis
 - **Reply chains**: Gronk sees full conversation context in reply threads
 
+### Natural Language History Analysis (NEW! 🧠)
+
+Simply mention Gronk and ask questions about your Discord history naturally:
+
+```
+@Gronk who talks about Python the most in the past month?
+@Gronk what have we discussed about AI recently?
+@Gronk summarize our conversations from last week
+@Gronk @john what are his opinions on crypto?
+@Gronk who mentions gaming the most here?
+```
+
+**How it works:**
+- 🎯 **Smart Detection**: Automatically determines if you're asking about Discord history or general questions
+- 🔍 **Hybrid Classification**: Uses keyword patterns + Grok AI classification for ambiguous queries
+- ⏱️ **Time Parsing**: Understands "past month", "last week", "recently", etc.
+- 🏷️ **Topic Extraction**: Detects keywords like "about Python", "regarding AI", etc.
+- 📊 **Same Power**: Uses the same analysis engine as `!search` with citations and timestamps
+
+**What triggers Discord search:**
+- ✅ Mentioning a user: `@Gronk @john what did he say?`
+- ✅ Discord scope words: "here", "in this channel", "this server"
+- ✅ Discord pronouns: "we", "us", "our"
+- ✅ Time + analysis patterns: "who talked about X recently?"
+- ✅ Activity verbs: "who posted about X?"
+
+**What stays as general queries:**
+- ❌ General knowledge: `@Gronk who invented Python?`
+- ❌ World context: `@Gronk what's happening in the news?`
+- ❌ No Discord indicators: `@Gronk explain quantum computing`
+
+**Configuration:**
+- Set `ENABLE_NL_HISTORY_SEARCH=false` in `.env` to disable this feature
+- Fallback to explicit `!search` command if disabled
+
 ### Search Command
 
-**`!search [options] <query>`** - Search and analyze message history
+**`!search [options] <query>`** - Explicit search command for advanced control
 
 **Basic Usage:**
 ```
@@ -165,7 +209,9 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with adva
   - With `MAX_KEYWORD_SCAN=50000`: ~60-120+ seconds
   - Progress updates shown every 2000 messages to indicate the bot is still working
   - Reduce `MAX_KEYWORD_SCAN` in `.env` for faster searches at the cost of less history coverage
-- **Analysis limit**: Analyzes up to 100 most recent messages (token limit)
+- **Analysis limit**: Analyzes up to `MAX_MESSAGES_ANALYZED` most recent messages (default: 500)
+  - Increase for deeper analysis: `MAX_MESSAGES_ANALYZED=1000` or even higher
+  - 100 msgs ≈ $0.002-0.005, 500 msgs ≈ $0.01-0.025, 1000 msgs ≈ $0.02-0.05
 - **Message length**: Each message truncated to 300 characters in analysis
 - **Bot filtering**: Bot messages excluded from channel-wide searches
 - **Response splitting**: Automatic splitting for long responses with citation preservation
@@ -184,19 +230,44 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with adva
 
 - **Models**: Grok-4-fast (text), Grok-2-vision-1212 (images)
 - **Web Search**: Live Search API with auto mode (3 sources max by default)
+- **Natural Language Detection**: 3-tier hybrid system (keywords → pattern scoring → Grok classification)
 - **Message Search**: Optimized scanning with progress tracking, citation linking, and timezone conversion
 - **Memory**: Per-user, per-channel conversation history (last 10 messages)
 - **Image Support**: JPEG, PNG, WebP (attachments, URLs, embeds)
 - **Context**: Reply chain traversal + time-aware message history (2-minute window)
 - **Citation System**: Regex-based detection of individual citations `[#N]` and ranges `[#N-M]` with Discord link conversion
 - **Timezone**: pytz-based timezone conversion with automatic DST handling
+- **Query Routing**: 90% instant keyword detection, 10% Grok-assisted classification for ambiguous cases
 
 ## Troubleshooting
 
+### General Issues
 - **Bot doesn't respond**: Check that Message Content Intent is enabled in Discord Developer Portal
 - **Image errors**: Only JPEG, PNG, and WebP formats are supported
 - **High costs**: Reduce `MAX_SEARCH_RESULTS` or disable `ENABLE_WEB_SEARCH` in `.env`
 - **Slow keyword searches**: Reduce `MAX_KEYWORD_SCAN` in `.env` (default: 10,000)
 - **Wrong timestamps**: Set correct `TIMEZONE` in `.env` using IANA timezone names
-- **Citations not linking**: Ensure messages are in the analyzed set (last 100 messages)
+- **Citations not linking**: Ensure messages are in the analyzed set (limited by `MAX_MESSAGES_ANALYZED`)
 - **Embed size errors**: Automatically handled by splitting into multiple embeds
+- **Want more detailed analysis**: Increase `MAX_MESSAGES_ANALYZED` in `.env` (costs scale linearly)
+
+### Natural Language History Analysis
+- **Bot searches Discord when I ask general questions**: 
+  - Check your phrasing for Discord indicators ("we", "here", "this channel")
+  - Add world context: "in history", "globally", "in the world"
+  - Example: Change "who is the smartest?" to "who is the smartest in history?"
+  
+- **Bot doesn't search Discord when I want it to**:
+  - Add Discord indicators: "here", "in this channel", "what have WE discussed"
+  - Mention a user: `@Gronk @john what did he say?`
+  - Use explicit `!search` command for full control
+  
+- **Disable natural language detection**:
+  - Set `ENABLE_NL_HISTORY_SEARCH=false` in `.env`
+  - All history searches will require explicit `!search` command
+
+### Testing
+Run the test script to verify natural language detection:
+```powershell
+python test_nl_detection.py
+```

@@ -32,6 +32,9 @@ GROK_VISION_MODEL = os.getenv('GROK_VISION_MODEL', 'grok-2-vision-1212')
 ENABLE_WEB_SEARCH = os.getenv('ENABLE_WEB_SEARCH', 'true').lower() == 'true'
 MAX_SEARCH_RESULTS = int(os.getenv('MAX_SEARCH_RESULTS', '3'))
 MAX_KEYWORD_SCAN = int(os.getenv('MAX_KEYWORD_SCAN', '10000'))
+ENABLE_NL_HISTORY_SEARCH = os.getenv('ENABLE_NL_HISTORY_SEARCH', 'true').lower() == 'true'
+MAX_MESSAGES_ANALYZED = int(os.getenv('MAX_MESSAGES_ANALYZED', '500'))  # Max messages sent to Grok for analysis
+DEFAULT_SEARCH_LIMIT = int(os.getenv('DEFAULT_SEARCH_LIMIT', '5000'))  # Default messages to scan when no limit specified
 
 # Pricing configuration (with defaults based on current xAI pricing)
 GROK_TEXT_INPUT_COST = float(os.getenv('GROK_TEXT_INPUT_COST', '0.20'))
@@ -205,10 +208,10 @@ async def search_history(ctx, *, query_text: str):
             'last_query': query
         }
         
-        # Build context for Grok (use up to 100 messages to stay within token limits)
+        # Build context for Grok (configurable limit via MAX_MESSAGES_ANALYZED)
         # Since collected_messages is in reverse chronological order (newest first),
         # we take the first N messages (most recent) and then reverse them for chronological order
-        messages_to_analyze = min(len(collected_messages), 100)
+        messages_to_analyze = min(len(collected_messages), MAX_MESSAGES_ANALYZED)
         messages_for_context = collected_messages[:messages_to_analyze]
         
         if target_user:
@@ -233,7 +236,7 @@ async def search_history(ctx, *, query_text: str):
                 context_parts.append(f"[{i}] [{timestamp_str}] {author_name}: {content}")
         
         context_parts.append(f"\n\nBased on these messages, {query}")
-        context_parts.append("\n\nIMPORTANT: When referencing specific messages in your answer, cite them using the format [#N] where N is the message number. For example: 'In message [#5], they mentioned...' or 'See messages [#3], [#7], and [#12] for examples.'")
+        context_parts.append("\n\nIMPORTANT: When citing messages, use EXACTLY this format: [#N] where N is the message number. For example: [#5] or [#12]. Do NOT add any extra text or context inside the brackets. Multiple citations should look like: [#3], [#7], and [#12]. Ranges should look like: [#5-#10] (hyphen with no spaces).")
         context_parts.append("\n\nNote: Custom Discord emojis appear as <:emoji_name:emoji_id>. When quoting messages with emojis, preserve this exact format.")
         tz_name = TIMEZONE.zone  # e.g., "America/Chicago"
         context_parts.append(f"\n\nNote: All timestamps are in {tz_name} timezone.")
@@ -260,10 +263,14 @@ async def search_history(ctx, *, query_text: str):
             
             response = completion.choices[0].message.content
             
+            # Clean up malformed citations (e.g., #248(⁠post-election-year-hate-dome⁠) -> [#248])
+            malformed_citation_pattern = r'#(\d+)\([^)]*\)'
+            response = re.sub(malformed_citation_pattern, r'[#\1]', response)
+            
             # Parse citations from response and extract referenced message numbers
-            # Match both individual citations [#N] and ranges [#N]-[M], [#N]-M, or [#N-M]
+            # Match both individual citations [#N] and ranges [#N-#M], [#N]-[#M], [#N-M]
             citation_pattern = r'\[#(\d+)\]'
-            range_pattern = r'\[#(\d+)(?:\]-?\[?|-)(\d+)\]?'  # Matches [#88]-[90], [#88]-90, or [#88-90]
+            range_pattern = r'\[#(\d+)(?:-#?|(?:\]-?\[?#?))(\d+)\]'  # Matches [#88-#90], [#88]-[#90], [#88-90]
             
             # Find individual citations (but not those that are part of ranges)
             cited_numbers = set()
@@ -544,6 +551,503 @@ async def search_history(ctx, *, query_text: str):
             # If searching message was already deleted, send a new message
             await ctx.reply(f"❌ Error searching messages: {str(e)}")
 
+async def should_search_discord_history(message_content, has_mentions):
+    """
+    Determine if the user query is asking to search Discord history.
+    
+    Returns:
+        tuple: (should_search: bool, time_limit: Optional[int], target_keywords: Optional[str])
+    """
+    content_lower = message_content.lower()
+    
+    # 1. STRONGEST SIGNALS - Instant match (no API call needed)
+    if has_mentions:
+        logger.info('Discord search detected: user mention found')
+        # Extract time period if present
+        time_limit = extract_time_period(content_lower)
+        keywords = extract_keywords(content_lower)
+        return True, time_limit, keywords
+    
+    # Check for explicit Discord scope indicators
+    discord_scope_keywords = [
+        "here", "in here", "this channel", "this server", 
+        "on this server", "in this chat", "in chat",
+        "this discord", "on this discord", "in this discord",
+        "of this discord", "of this server", "of this channel"
+    ]
+    if any(scope in content_lower for scope in discord_scope_keywords):
+        logger.info('Discord search detected: explicit scope keyword')
+        time_limit = extract_time_period(content_lower)
+        keywords = extract_keywords(content_lower)
+        return True, time_limit, keywords
+    
+    # Check for Discord-specific pronouns (we/us/our)
+    discord_pronouns = [" we ", " us ", " our "]
+    has_discord_pronoun = any(pronoun in " " + content_lower + " " for pronoun in discord_pronouns)
+    
+    # 2. OBVIOUS GENERAL QUERIES - Skip API call
+    general_indicators = [
+        "in history", "in the world", "on twitter", "on x.com",
+        "in the news", "globally", "worldwide", "scientists say",
+        "researchers found", "studies show", "according to"
+    ]
+    if any(indicator in content_lower for indicator in general_indicators):
+        logger.info('General query detected: general indicator found')
+        return False, None, None
+    
+    # 3. PATTERN DETECTION for ambiguous cases
+    # Check for temporal patterns
+    time_patterns = [
+        r'(past|last|over the|in the|during the)\s*(month|week|day|year|30 days)',
+        r'recently',
+        r'this\s*(week|month|year)',
+    ]
+    has_temporal = any(re.search(pattern, content_lower) for pattern in time_patterns)
+    
+    # Check for analysis patterns
+    analysis_patterns = [
+        r'who\s+(talks?|mentions?|discusses?|posts?|says?|chats?)',
+        r'what\s+(have|has|did|do)\s+(we|users?|people)',
+        r'(summarize|summary|overview)',
+        r'(most|least|top|bottom)\s+',
+        r'how (often|many|much)',
+        r'rank\s+(members?|users?|people)',  # Added rank pattern
+    ]
+    has_analysis = any(re.search(pattern, content_lower) for pattern in analysis_patterns)
+    
+    # Score-based decision for ambiguous cases
+    discord_score = 0
+    
+    if has_discord_pronoun:
+        discord_score += 2
+        logger.debug('Discord pronoun detected (+2)')
+    
+    if has_temporal and has_analysis:
+        discord_score += 2
+        logger.debug('Temporal + analysis pattern detected (+2)')
+    
+    # Check for activity verbs (Discord-specific actions)
+    activity_verbs = ["posted", "sent", "messaged", "said here", "mentioned in", "talked in"]
+    if any(verb in content_lower for verb in activity_verbs):
+        discord_score += 1
+        logger.debug('Discord activity verb detected (+1)')
+    
+    # Decision based on score
+    if discord_score >= 3:
+        logger.info(f'Discord search detected: score {discord_score} >= 3')
+        time_limit = extract_time_period(content_lower)
+        keywords = extract_keywords(content_lower)
+        return True, time_limit, keywords
+    elif discord_score >= 1:
+        # Ambiguous case - use Grok to classify
+        logger.info(f'Ambiguous query (score {discord_score}), using Grok classification...')
+        try:
+            is_discord = await classify_with_grok(message_content)
+            if is_discord:
+                time_limit = extract_time_period(content_lower)
+                keywords = extract_keywords(content_lower)
+                return True, time_limit, keywords
+            else:
+                return False, None, None
+        except Exception as e:
+            logger.warning(f'Grok classification failed: {e}, defaulting to general query')
+            return False, None, None
+    else:
+        logger.info(f'General query detected: score {discord_score} < 1')
+        return False, None, None
+
+def extract_time_period(content_lower):
+    """Extract time period in number of messages to scan"""
+    # Map time periods to approximate message counts
+    time_mappings = {
+        r'past\s*month|last\s*month|30\s*days': 5000,
+        r'past\s*week|last\s*week|7\s*days': 2000,
+        r'past\s*day|last\s*day|24\s*hours|today': 500,
+        r'past\s*year|last\s*year': 10000,
+        r'recently': 1000,
+    }
+    
+    for pattern, limit in time_mappings.items():
+        if re.search(pattern, content_lower):
+            logger.debug(f'Time period extracted: {limit} messages')
+            return limit
+    
+    return None  # No time period specified
+
+def extract_keywords(content_lower):
+    """Extract topic keywords from the query"""
+    # Look for "about X", "regarding X", "discussing X", etc.
+    keyword_patterns = [
+        r'about\s+(\w+)',
+        r'regarding\s+(\w+)',
+        r'discussing\s+(\w+)',
+        r'mentioned\s+(\w+)',
+        r'talked about\s+(\w+)',
+    ]
+    
+    for pattern in keyword_patterns:
+        match = re.search(pattern, content_lower)
+        if match:
+            keyword = match.group(1)
+            logger.debug(f'Keyword extracted: {keyword}')
+            return keyword
+    
+    return None
+
+async def classify_with_grok(message_content):
+    """Use Grok to classify if query is about Discord or general knowledge"""
+    classification_prompt = f"""You are analyzing a Discord bot query. Determine if the user is asking about:
+
+A) DISCORD: The Discord server's chat history, messages, or users in THIS server
+B) GENERAL: General knowledge, news, history, or topics outside this Discord server
+
+Examples of DISCORD queries:
+- "who talks about Python the most?"
+- "what have we discussed about AI recently?"
+- "summarize our conversations from last week"
+- "who mentions crypto the most?"
+- "what are the main topics discussed here?"
+
+Examples of GENERAL queries:
+- "who was the smartest person in history?"
+- "what have scientists discussed about climate change?"
+- "summarize news from last week"
+- "what did Elon Musk say recently?"
+- "who is the best programmer in the world?"
+
+User query: "{message_content}"
+
+Respond with ONLY one word: "DISCORD" or "GENERAL"
+"""
+    
+    try:
+        # Use a quick, cheap API call for classification
+        completion = client.chat.completions.create(
+            model=GROK_TEXT_MODEL,
+            messages=[{"role": "user", "content": classification_prompt}],
+            max_tokens=10,  # We only need one word
+            temperature=0.3  # Lower temperature for more consistent classification
+        )
+        
+        response = completion.choices[0].message.content.strip().upper()
+        logger.info(f'Grok classification result: {response}')
+        
+        return "DISCORD" in response
+    except Exception as e:
+        logger.error(f'Error in Grok classification: {e}')
+        return False
+
+async def perform_discord_history_search(message, query, time_limit=None, keywords=None, target_user=None):
+    """
+    Search Discord history and analyze with Grok
+    
+    Args:
+        message: Discord message object
+        query: User's search query
+        time_limit: Optional number of messages to scan
+        keywords: Optional keyword to pre-filter messages
+        target_user: Optional user to search (if mentioned)
+    """
+    # Use default time limit if not specified
+    if time_limit is None:
+        time_limit = DEFAULT_SEARCH_LIMIT
+    
+    # Determine if we should use keyword filtering
+    use_keyword_filter = keywords is not None
+    
+    # Send searching message
+    if target_user:
+        if use_keyword_filter:
+            searching_msg = await message.reply(f"🔍 Analyzing {target_user.mention}'s messages about `{keywords}` (scanning up to {time_limit:,} messages)...")
+        else:
+            searching_msg = await message.reply(f"🔍 Analyzing {target_user.mention}'s message history (last {time_limit:,} messages)...")
+    else:
+        if use_keyword_filter:
+            searching_msg = await message.reply(f"🔍 Analyzing channel messages about `{keywords}` (scanning up to {time_limit:,} messages)...")
+        else:
+            searching_msg = await message.reply(f"🔍 Analyzing channel message history (last {time_limit:,} messages)...")
+    
+    try:
+        # Collect messages
+        collected_messages = []
+        messages_scanned = 0
+        last_update = 0
+        
+        async for msg in message.channel.history(limit=min(time_limit, MAX_KEYWORD_SCAN)):
+            # Skip the command message
+            if msg.id == message.id:
+                continue
+            
+            messages_scanned += 1
+            
+            # Apply filters
+            if target_user and msg.author != target_user:
+                continue
+            
+            if not target_user and msg.author.bot:
+                continue
+            
+            if use_keyword_filter and keywords.lower() not in msg.content.lower():
+                continue
+            
+            collected_messages.append(msg)
+            
+            # Update progress every 2000 messages
+            if messages_scanned - last_update >= 2000:
+                last_update = messages_scanned
+                try:
+                    progress_pct = int((messages_scanned / time_limit) * 100)
+                    await searching_msg.edit(content=f"🔍 Analyzing... ({progress_pct}% - scanned {messages_scanned:,}, found {len(collected_messages):,})")
+                except:
+                    pass
+        
+        if not collected_messages:
+            await searching_msg.edit(content=f"❌ No messages found matching your criteria.")
+            return
+        
+        logger.info(f'Found {len(collected_messages)} messages for analysis')
+        
+        # Build context for Grok (configurable limit via MAX_MESSAGES_ANALYZED)
+        messages_to_analyze = min(len(collected_messages), MAX_MESSAGES_ANALYZED)
+        messages_for_context = collected_messages[:messages_to_analyze]
+        
+        # Create message context with numbers for citations
+        context_parts = [f"User query: {query}\n"]
+        if target_user:
+            context_parts.append(f"Analyzing user {target_user.name}'s messages (showing {messages_to_analyze} of {len(collected_messages)} found, oldest to newest):\n")
+        else:
+            context_parts.append(f"Analyzing channel messages (showing {messages_to_analyze} of {len(collected_messages)} found, oldest to newest):\n")
+        
+        message_number_map = {}
+        for i, msg in enumerate(reversed(messages_for_context), 1):
+            timestamp_local = msg.created_at.astimezone(TIMEZONE)
+            tz_abbr = timestamp_local.strftime("%Z")
+            timestamp_str = timestamp_local.strftime(f"%Y-%m-%d %H:%M {tz_abbr}")
+            author_name = msg.author.name if not target_user else ""
+            content = msg.content[:300] + "..." if len(msg.content) > 300 else msg.content
+            message_number_map[i] = msg
+            if target_user:
+                context_parts.append(f"[{i}] [{timestamp_str}] {content}")
+            else:
+                context_parts.append(f"[{i}] [{timestamp_str}] {author_name}: {content}")
+        
+        context_parts.append(f"\n\nBased on these messages, answer: {query}")
+        context_parts.append("\n\nIMPORTANT: When citing messages, use EXACTLY this format: [#N] where N is the message number. For example: [#5] or [#12]. Do NOT add any extra text or context inside the brackets. Multiple citations should look like: [#3], [#7], and [#12]. Ranges should look like: [#5-#10] (hyphen with no spaces).")
+        context_parts.append(f"\n\nNote: All timestamps are in {TIMEZONE.zone} timezone.")
+        full_prompt = "\n".join(context_parts)
+        
+        # Query Grok
+        async with message.channel.typing():
+            request_params = {
+                "model": GROK_TEXT_MODEL,
+                "messages": [{"role": "user", "content": full_prompt}]
+            }
+            
+            if ENABLE_WEB_SEARCH:
+                request_params["extra_body"] = {
+                    "search_parameters": {
+                        "mode": "auto",
+                        "max_search_results": MAX_SEARCH_RESULTS
+                    }
+                }
+            
+            completion = client.chat.completions.create(**request_params)
+            response = completion.choices[0].message.content
+            
+            # Clean up malformed citations (e.g., #248(⁠post-election-year-hate-dome⁠) -> [#248])
+            # First, find citations with extra junk and normalize them
+            malformed_citation_pattern = r'#(\d+)\([^)]*\)'
+            response = re.sub(malformed_citation_pattern, r'[#\1]', response)
+            
+            # Process citations
+            citation_pattern = r'\[#(\d+)\]'
+            range_pattern = r'\[#(\d+)(?:-#?|(?:\]-?\[?#?))(\d+)\]'  # Matches [#88-#90], [#88]-[#90], [#88-90]
+            
+            def replace_citation(match):
+                pos = match.start()
+                after_pos = match.end()
+                
+                if after_pos < len(response) - 2 and response[after_pos:after_pos+2] == '](':
+                    return match.group(0)
+                
+                if after_pos < len(response) and response[after_pos:after_pos+1] == '-':
+                    return match.group(0)
+                if pos > 0 and response[pos-1:pos] == '-':
+                    return match.group(0)
+                
+                msg_num = int(match.group(1))
+                if msg_num in message_number_map:
+                    msg = message_number_map[msg_num]
+                    msg_link = f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{msg.id}"
+                    return f"[#{msg_num}]({msg_link})"
+                return match.group(0)
+            
+            def replace_range(match):
+                start_num = int(match.group(1))
+                end_num = int(match.group(2))
+                links = []
+                for msg_num in range(start_num, end_num + 1):
+                    if msg_num in message_number_map:
+                        msg = message_number_map[msg_num]
+                        msg_link = f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{msg.id}"
+                        links.append(f"[#{msg_num}]({msg_link})")
+                    else:
+                        links.append(f"[#{msg_num}]")
+                return "-".join(links) if links else match.group(0)
+            
+            response = re.sub(range_pattern, replace_range, response)
+            response = re.sub(citation_pattern, replace_citation, response)
+            
+            # Calculate cost
+            request_cost = 0
+            usage_text = ""
+            if hasattr(completion, 'usage') and completion.usage:
+                if hasattr(completion.usage, 'prompt_tokens_details') and completion.usage.prompt_tokens_details:
+                    cached = completion.usage.prompt_tokens_details.cached_tokens
+                    uncached = completion.usage.prompt_tokens - cached
+                    input_cost = (uncached / 1_000_000) * GROK_TEXT_INPUT_COST + (cached / 1_000_000) * GROK_TEXT_CACHED_COST
+                else:
+                    input_cost = (completion.usage.prompt_tokens / 1_000_000) * GROK_TEXT_INPUT_COST
+                output_cost = (completion.usage.completion_tokens / 1_000_000) * GROK_TEXT_OUTPUT_COST
+                request_cost = input_cost + output_cost
+                usage_text = f"💵 ${request_cost:.6f} • {completion.usage.prompt_tokens} in / {completion.usage.completion_tokens} out"
+            
+            await searching_msg.delete()
+            
+            # Create embed(s) - split if response is too long
+            title = "🔍 Discord History Analysis"
+            if target_user:
+                title += f": {target_user.display_name}"
+            
+            if len(response) <= 4096:
+                # Single embed
+                embed = discord.Embed(
+                    title=title,
+                    description=response,
+                    color=discord.Color.purple(),
+                    timestamp=message.created_at
+                )
+                embed.set_author(
+                    name="Grok Analysis",
+                    icon_url="https://pbs.twimg.com/profile_images/1683899100922511378/5lY42eHs_400x400.jpg"
+                )
+                embed.add_field(
+                    name="Query",
+                    value=query[:1024],
+                    inline=False
+                )
+                embed.add_field(
+                    name="Analyzed",
+                    value=f"{len(collected_messages)} messages total",
+                    inline=False
+                )
+                
+                footer_text = f"Requested by {message.author.display_name}"
+                if usage_text:
+                    footer_text += f" • {usage_text}"
+                embed.set_footer(text=footer_text, icon_url=message.author.avatar.url if message.author.avatar else None)
+                
+                await message.reply(embed=embed)
+            else:
+                # Split into multiple embeds
+                chunks = []
+                current_chunk = ""
+                
+                # Split by paragraphs to avoid breaking markdown links
+                paragraphs = response.split('\n\n')
+                
+                for para in paragraphs:
+                    # Check if adding this paragraph would exceed limit
+                    if len(current_chunk) + len(para) + 2 > 4096:
+                        if current_chunk:
+                            chunks.append(current_chunk.rstrip())
+                            current_chunk = ""
+                        
+                        # If paragraph itself is too long, split it
+                        if len(para) > 4096:
+                            # Split by sentences
+                            sentences = para.split('. ')
+                            for sentence in sentences:
+                                sentence_with_period = sentence + '. ' if not sentence.endswith('.') else sentence + ' '
+                                
+                                if len(current_chunk) + len(sentence_with_period) > 4096:
+                                    if current_chunk:
+                                        chunks.append(current_chunk.rstrip())
+                                        current_chunk = ""
+                                    
+                                    # If single sentence is too long, force split
+                                    if len(sentence_with_period) > 4096:
+                                        for i in range(0, len(sentence_with_period), 4096):
+                                            chunks.append(sentence_with_period[i:i+4096])
+                                    else:
+                                        current_chunk = sentence_with_period
+                                else:
+                                    current_chunk += sentence_with_period
+                        else:
+                            current_chunk = para + '\n\n'
+                    else:
+                        current_chunk += para + '\n\n'
+                
+                if current_chunk.strip():
+                    chunks.append(current_chunk.rstrip())
+                
+                # Validate all chunks are within limit
+                validated_chunks = []
+                for chunk in chunks:
+                    if len(chunk) > 4096:
+                        logger.warning(f'Chunk exceeded 4096 chars ({len(chunk)}), force splitting...')
+                        # Force split at 4096 boundaries
+                        for i in range(0, len(chunk), 4096):
+                            validated_chunks.append(chunk[i:i+4096])
+                    else:
+                        validated_chunks.append(chunk)
+                
+                chunks = validated_chunks
+                logger.info(f'Split response into {len(chunks)} embeds (validated)')
+                
+                for i, chunk in enumerate(chunks):
+                    embed = discord.Embed(
+                        title=f"{title} (Part {i+1}/{len(chunks)})" if i > 0 else title,
+                        description=chunk,
+                        color=discord.Color.purple(),
+                        timestamp=message.created_at
+                    )
+                    embed.set_author(
+                        name="Grok Analysis",
+                        icon_url="https://pbs.twimg.com/profile_images/1683899100922511378/5lY42eHs_400x400.jpg"
+                    )
+                    
+                    # Add fields only to first embed
+                    if i == 0:
+                        embed.add_field(
+                            name="Query",
+                            value=query[:1024],
+                            inline=False
+                        )
+                        embed.add_field(
+                            name="Analyzed",
+                            value=f"{len(collected_messages)} messages total",
+                            inline=False
+                        )
+                    
+                    # Add footer only to last embed
+                    if i == len(chunks) - 1:
+                        footer_text = f"Requested by {message.author.display_name}"
+                        if usage_text:
+                            footer_text += f" • {usage_text}"
+                        embed.set_footer(text=footer_text, icon_url=message.author.avatar.url if message.author.avatar else None)
+                    
+                    await message.reply(embed=embed)
+            
+            logger.info('Discord history analysis completed')
+            
+    except Exception as e:
+        logger.error(f'Error in Discord history search: {e}', exc_info=True)
+        try:
+            await searching_msg.edit(content=f"❌ Error analyzing messages: {str(e)}")
+        except:
+            await message.reply(f"❌ Error analyzing messages: {str(e)}")
+
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
@@ -568,6 +1072,22 @@ async def on_message(message):
         
         # Build context if this is a reply
         prompt = message.content.replace(f'<@{bot.user.id}>', '').replace(f'<@!{bot.user.id}>', '').strip()
+        
+        # Check if this is a Discord history analysis query (if feature enabled)
+        if ENABLE_NL_HISTORY_SEARCH:
+            target_user = message.mentions[0] if message.mentions and message.mentions[0] != bot.user else None
+            should_search, time_limit, keywords = await should_search_discord_history(prompt, target_user is not None)
+            
+            if should_search:
+                logger.info(f'Discord history search triggered for query: {prompt}')
+                await perform_discord_history_search(
+                    message=message,
+                    query=prompt,
+                    time_limit=time_limit,
+                    keywords=keywords,
+                    target_user=target_user
+                )
+                return  # Don't process as normal query
         
         # Check if this is a follow-up to a previous conversation
         is_search_followup = False
@@ -610,7 +1130,7 @@ async def on_message(message):
                             context_parts.append(f"[{i}] [{timestamp_str}] {content}")
                         
                         context_parts.append(f"\n\nAnswer this follow-up question: {prompt}")
-                        context_parts.append("\n\nIMPORTANT: When referencing specific messages in your answer, cite them using the format [#N] where N is the message number. For example: 'In message [#5], they mentioned...' or 'See messages [#3], [#7], and [#12] for examples.'")
+                        context_parts.append("\n\nIMPORTANT: When citing messages, use EXACTLY this format: [#N] where N is the message number. For example: [#5] or [#12]. Do NOT add any extra text or context inside the brackets. Multiple citations should look like: [#3], [#7], and [#12]. Ranges should look like: [#5-#10] (hyphen with no spaces).")
                         context_parts.append("\n\nNote: Custom Discord emojis appear as <:emoji_name:emoji_id>. When quoting messages with emojis, preserve this exact format.")
                         tz_name = TIMEZONE.zone
                         context_parts.append(f"\n\nNote: All timestamps are in {tz_name} timezone.")
@@ -893,10 +1413,14 @@ async def on_message(message):
                 
                 # Process citations if this is a search follow-up with message_number_map
                 if is_search_followup and 'message_number_map' in locals():
+                    # Clean up malformed citations first
+                    malformed_citation_pattern = r'#(\d+)\([^)]*\)'
+                    response = re.sub(malformed_citation_pattern, r'[#\1]', response)
+                    
                     # Parse citations from response and extract referenced message numbers
-                    # Match both individual citations [#N] and ranges [#N]-[M], [#N]-M, or [#N-M]
+                    # Match both individual citations [#N] and ranges [#N-#M], [#N]-[#M], [#N-M]
                     citation_pattern = r'\[#(\d+)\]'
-                    range_pattern = r'\[#(\d+)(?:\]-?\[?|-)(\d+)\]?'  # Matches [#88]-[90], [#88]-90, or [#88-90]
+                    range_pattern = r'\[#(\d+)(?:-#?|(?:\]-?\[?#?))(\d+)\]'  # Matches [#88-#90], [#88]-[#90], [#88-90]
                     
                     # Find individual citations (but not those that are part of ranges)
                     cited_numbers = set()

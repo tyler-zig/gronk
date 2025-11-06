@@ -31,6 +31,7 @@ GROK_VISION_MODEL = os.getenv('GROK_VISION_MODEL', 'grok-2-vision-1212')
 # Search configuration (with defaults)
 ENABLE_WEB_SEARCH = os.getenv('ENABLE_WEB_SEARCH', 'true').lower() == 'true'
 MAX_SEARCH_RESULTS = int(os.getenv('MAX_SEARCH_RESULTS', '3'))
+MAX_KEYWORD_SCAN = int(os.getenv('MAX_KEYWORD_SCAN', '10000'))
 
 # Pricing configuration (with defaults based on current xAI pricing)
 GROK_TEXT_INPUT_COST = float(os.getenv('GROK_TEXT_INPUT_COST', '0.20'))
@@ -103,46 +104,84 @@ async def search_history(ctx, *, query_text: str):
                 return
     
     if target_user:
-        logger.info(f'Search command by {ctx.author} for user {target_user} with query: {query}, limit: {limit}')
+        logger.info(f'Search command by {ctx.author} for user {target_user} with query: {query}, limit: {limit}, keyword: {keyword_filter}')
     else:
-        logger.info(f'Search command by {ctx.author} for ALL users with query: {query}, limit: {limit}')
+        logger.info(f'Search command by {ctx.author} for ALL users with query: {query}, limit: {limit}, keyword: {keyword_filter}')
     
     # Send a "searching" message
-    if target_user:
-        searching_msg = await ctx.reply(f"🔍 Searching {target_user.mention}'s message history (last {limit} messages)...")
+    if keyword_filter:
+        # Keyword search scans entire history
+        if target_user:
+            searching_msg = await ctx.reply(f"🔍 Searching {target_user.mention}'s message history for keyword `{keyword_filter}`...")
+        else:
+            searching_msg = await ctx.reply(f"🔍 Searching channel history for keyword `{keyword_filter}`...")
     else:
-        searching_msg = await ctx.reply(f"🔍 Searching channel message history (last {limit} messages)...")
+        # Regular search with limit
+        if target_user:
+            searching_msg = await ctx.reply(f"🔍 Searching {target_user.mention}'s message history (last {limit} messages)...")
+        else:
+            searching_msg = await ctx.reply(f"🔍 Searching channel message history (last {limit} messages)...")
     
     try:
         # Collect messages (history returns newest first)
         collected_messages = []
         messages_scanned = 0
+        last_update = 0
         
-        # Increase scan limit for keyword filtering to ensure we get enough messages
-        scan_limit = limit * 3 if keyword_filter else limit + 100
+        # For keyword filtering, scan much more to find filtered results
+        # Otherwise just scan a bit more than the limit
+        if keyword_filter:
+            # Scan up to MAX_KEYWORD_SCAN messages for keyword searches
+            max_scan = MAX_KEYWORD_SCAN
+        else:
+            max_scan = limit + 100
         
-        async for msg in ctx.channel.history(limit=scan_limit):
-            messages_scanned += 1
-            
-            # Skip the search command itself
+        # Pre-compute lowercase keyword for faster comparison
+        keyword_lower = keyword_filter.lower() if keyword_filter else None
+        
+        async for msg in ctx.channel.history(limit=max_scan):
+            # Skip the search command itself immediately
             if msg.id == ctx.message.id:
                 continue
             
-            # Apply keyword filter first if specified
-            if keyword_filter and keyword_filter not in msg.content.lower():
+            messages_scanned += 1
+            
+            # Apply filters efficiently (short-circuit evaluation)
+            # Check user filter first (faster than string operations)
+            if target_user and msg.author != target_user:
                 continue
             
-            if target_user:
-                # Search specific user
-                if msg.author == target_user:
-                    collected_messages.append(msg)
-            else:
-                # Search all users (exclude bots)
-                if not msg.author.bot:
-                    collected_messages.append(msg)
+            # Check bot filter for non-targeted searches
+            if not target_user and msg.author.bot:
+                continue
             
-            # Stop if we have enough messages
-            if len(collected_messages) >= limit:
+            # Apply keyword filter last (most expensive operation)
+            if keyword_lower and keyword_lower not in msg.content.lower():
+                continue
+            
+            # Message passed all filters
+            collected_messages.append(msg)
+            
+            # Update progress message every 2000 messages scanned (even less frequent)
+            if messages_scanned - last_update >= 2000:
+                last_update = messages_scanned
+                try:
+                    if keyword_filter:
+                        progress_pct = int((messages_scanned / max_scan) * 100) if max_scan > 0 else 0
+                        if target_user:
+                            await searching_msg.edit(content=f"🔍 Searching {target_user.mention}'s message history for keyword `{keyword_filter}`... ({progress_pct}% - scanned {messages_scanned:,}, found {len(collected_messages):,})")
+                        else:
+                            await searching_msg.edit(content=f"🔍 Searching channel history for keyword `{keyword_filter}`... ({progress_pct}% - scanned {messages_scanned:,}, found {len(collected_messages):,})")
+                    else:
+                        if target_user:
+                            await searching_msg.edit(content=f"🔍 Searching {target_user.mention}'s message history... (scanned {messages_scanned:,}, found {len(collected_messages):,})")
+                        else:
+                            await searching_msg.edit(content=f"🔍 Searching channel message history... (scanned {messages_scanned:,}, found {len(collected_messages):,})")
+                except:
+                    pass  # Ignore errors updating status
+            
+            # For non-keyword searches, stop when we have enough
+            if not keyword_filter and len(collected_messages) >= limit:
                 break
         
         if not collected_messages:

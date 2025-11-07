@@ -258,10 +258,15 @@ Simply mention Gronk and ask questions about your Discord history naturally:
 - **Web Search**: Live Search API with auto mode (3 sources max by default)
 - **Natural Language Detection**: 3-tier hybrid system (keywords → pattern scoring → Grok classification)
 - **Message Search**: Optimized scanning with progress tracking, citation linking, and timezone conversion
-- **Memory**: Per-user, per-channel conversation history (last 10 messages)
+- **Memory**: SQLite persistent storage with thread-aware context
+  - Stores conversation history per bot message (user query + bot response)
+  - Traverses full reply chains (up to 10 messages deep) to build complete thread context
+  - Automatic cleanup of conversations older than 24 hours (configurable)
+  - Survives bot restarts and container rebuilds
+  - Database persisted via volume mounts in Docker deployments
 - **Image Support**: JPEG, PNG, WebP (attachments, URLs, embeds)
 - **Context**: Reply chain traversal + time-aware message history (2-minute window)
-- **Citation System**: Regex-based detection of individual citations `[#N]` and ranges `[#N-M]` with Discord link conversion
+- **Citation System**: Selective citations (3-6 per response) with individual message linking `[#N]` (no ranges)
 - **Timezone**: pytz-based timezone conversion with automatic DST handling
 - **Query Routing**: 90% instant keyword detection, 10% Grok-assisted classification for ambiguous cases
 

@@ -788,7 +788,12 @@ async def should_search_discord_history(message_content, has_mentions):
     general_indicators = [
         "in history", "in the world", "on twitter", "on x.com",
         "in the news", "globally", "worldwide", "scientists say",
-        "researchers found", "studies show", "according to"
+        "researchers found", "studies show", "according to",
+        "what is", "what are", "what was", "what were",
+        "how does", "how do", "how did", "how can", "how much", "how many", "how high", "how low", "how far",
+        "why does", "why do", "why did", "why is", "why are",
+        "where is", "where are", "where does", "where do",
+        "when is", "when are", "when does", "when do", "when did"
     ]
     if any(indicator in content_lower for indicator in general_indicators):
         logger.info('General query detected: general indicator found')

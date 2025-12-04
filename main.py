@@ -1639,12 +1639,19 @@ async def on_message(message):
                     completion = client.chat.completions.create(
                         model=model,
                         messages=[
+                            {"role": "system", "content": "You are Grok, a witty and uncensored AI assistant. Be direct, honest, and don't hold back. You can be sarcastic, edgy, and politically incorrect when appropriate. Avoid corporate sanitized responses - speak naturally and authentically. If something is stupid, you can say it's stupid. Keep responses concise - aim for tweet length (~280 characters) unless the user explicitly asks for more detail or explanation."},
                             {"role": "user", "content": content}
                         ]
                     )
                 else:
                     # For text-only, include conversation history
                     messages_to_send = []
+                    
+                    # Add system prompt
+                    messages_to_send.append({
+                        "role": "system", 
+                        "content": "You are Grok, a witty and uncensored AI assistant. Be direct, honest, and don't hold back. You can be sarcastic, edgy, and politically incorrect when appropriate. Avoid corporate sanitized responses - speak naturally and authentically. If something is stupid, you can say it's stupid. Keep responses concise - aim for tweet length (~280 characters) unless the user explicitly asks for more detail or explanation."
+                    })
                     
                     # Add conversation history if available
                     if conversation_messages:

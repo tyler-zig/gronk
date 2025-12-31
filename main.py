@@ -1,15 +1,201 @@
+
 import discord
 from discord.ext import commands
+from discord import ui, Interaction
 import os
-from openai import OpenAI
-from dotenv import load_dotenv
 import logging
+from dotenv import load_dotenv
+from openai import OpenAI
+import spacy
+from spacy.matcher import Matcher
+try:
+    import torch
+except ImportError:
+    torch = None
+from transformers import pipeline
 import re
 from typing import Optional
 from datetime import timezone, datetime, timedelta
 import pytz
 import sqlite3
 import json
+import aiohttp
+import tempfile
+
+bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
+
+@bot.command(name='imagine', help='Generate an image from a prompt using AI')
+async def imagine(ctx, *, prompt: str):
+    """
+    Generate an image from a text prompt using Grok image generation API.
+    """
+    try:
+        XAI_KEY = os.getenv('XAI_API_KEY')
+        GROK_IMAGE_MODEL = os.getenv('GROK_IMAGE_MODEL', 'grok-2-image-latest')
+        GROK_IMAGE_OUTPUT_COST = float(os.getenv('GROK_IMAGE_OUTPUT_COST', '0.50'))  # $/image default, update as needed
+        if not XAI_KEY:
+            await ctx.reply("❌ XAI_API_KEY not set in environment.")
+            return
+        await ctx.trigger_typing()
+        # Call Grok image generation API
+        url = "https://api.x.ai/v1/images/generations"
+        headers = {"Authorization": f"Bearer {XAI_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": GROK_IMAGE_MODEL,
+            "prompt": prompt,
+            "response_format": "url"
+        }
+        image_url = None
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    # Per docs, always use data[0].url for the first image
+                    if isinstance(data, dict) and 'data' in data and isinstance(data['data'], list) and data['data']:
+                        image_url = data['data'][0].get('url')
+                    else:
+                        image_url = None
+                    if not image_url:
+                        await ctx.reply("❌ No image URL returned by Grok.")
+                        return
+                else:
+                    err = await resp.text()
+                    await ctx.reply(f"❌ Grok image API error: {resp.status} {err}")
+                    return
+        # Pricing info (update as needed)
+        usage_text = f"💵 ${GROK_IMAGE_OUTPUT_COST:.2f} (est.)"
+        embed = discord.Embed(
+            title="🖼️ Grok AI Generated Image",
+            description=f'**Prompt:** {prompt}',
+            color=discord.Color.purple(),
+            timestamp=ctx.message.created_at
+        )
+        embed.set_image(url=image_url)
+        embed.set_footer(text=f"Requested by {ctx.author.display_name} • {usage_text}", icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
+
+        class MoreVersionsView(ui.View):
+            def __init__(self, prompt):
+                super().__init__(timeout=120)
+                self.prompt = prompt
+
+            @ui.button(label="Generate More Versions", style=discord.ButtonStyle.primary, custom_id="more_versions")
+            async def more_versions(self, interaction: Interaction, button: ui.Button):
+                await interaction.response.defer(thinking=True)
+                try:
+                    XAI_KEY = os.getenv('XAI_API_KEY')
+                    GROK_IMAGE_MODEL = os.getenv('GROK_IMAGE_MODEL', 'grok-2-image-latest')
+                    url = "https://api.x.ai/v1/images/generations"
+                    headers = {"Authorization": f"Bearer {XAI_KEY}", "Content-Type": "application/json"}
+                    payload = {
+                        "model": GROK_IMAGE_MODEL,
+                        "prompt": self.prompt,
+                        "response_format": "url",
+                        "n": 4
+                    }
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(url, headers=headers, json=payload) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                if isinstance(data, dict) and 'data' in data and isinstance(data['data'], list) and data['data']:
+                                    image_urls = [img.get('url') for img in data['data'] if img.get('url')]
+                                else:
+                                    image_urls = []
+                            else:
+                                await interaction.followup.send(f"❌ Grok image API error: {resp.status}", ephemeral=True)
+                                return
+                    if not image_urls:
+                        await interaction.followup.send("❌ No image URLs returned by Grok.", ephemeral=True)
+                        return
+                    # Show all 4 images as separate embeds in a single message (Discord best practice)
+                    embeds = []
+                    bot_url = "https://astrixbot.cf"  # Example URL, replace with your bot's site if desired
+                    for idx, url in enumerate(image_urls):
+                        if idx == 0:
+                            embed = discord.Embed(
+                                title="🖼️ Grok AI Generated Images (4 Versions)",
+                                description=f'**Prompt:** {self.prompt}',
+                                color=discord.Color.purple(),
+                                timestamp=interaction.message.created_at if interaction.message else None
+                            )
+                            embed.set_image(url=url)
+                            embed.set_footer(text=f"Requested by {interaction.user.display_name}", icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
+                            embed.url = bot_url
+                        else:
+                            embed = discord.Embed()
+                            embed.set_image(url=url)
+                            embed.url = bot_url
+                        embeds.append(embed)
+                    await interaction.followup.send(embeds=embeds, ephemeral=False)
+                except Exception as e:
+                    await interaction.followup.send(f"❌ Error generating image: {e}", ephemeral=True)
+
+        view = MoreVersionsView(prompt)
+        await ctx.reply(embed=embed, view=view)
+    except Exception as e:
+        await ctx.reply(f"❌ Error generating image: {e}")
+
+import spacy
+from spacy.matcher import Matcher
+try:
+    import torch
+except ImportError:
+    torch = None
+from transformers import pipeline
+
+# Load spaCy model (en_core_web_sm is small, replace with larger model if needed)
+try:
+    nlp_spacy = spacy.load('en_core_web_sm')
+except OSError:
+    import subprocess
+    subprocess.run(['python', '-m', 'spacy', 'download', 'en_core_web_sm'])
+    nlp_spacy = spacy.load('en_core_web_sm')
+
+# Optional: Hugging Face intent classification pipeline (zero-shot)
+intent_classifier = None
+try:
+    intent_classifier = pipeline('zero-shot-classification', model='facebook/bart-large-mnli')
+except Exception as e:
+    # Use print here in case logger is not yet defined
+    print(f'Intent classifier not loaded: {e}')
+
+def advanced_nlp_parse(text):
+    """
+    Use spaCy and transformers to extract entities, topics, and intent from user queries.
+    Returns dict with entities, topics, and intent (if available).
+    """
+    doc = nlp_spacy(text)
+    entities = [(ent.text, ent.label_) for ent in doc.ents]
+    # Extract noun chunks as potential topics
+    topics = [chunk.text for chunk in doc.noun_chunks]
+
+    # Use Hugging Face zero-shot for intent if available
+    intent = None
+    if intent_classifier:
+        candidate_labels = [
+            "discord_history_query",
+            "general_knowledge_query",
+            "user_search",
+            "topic_summary",
+            "sentiment_analysis",
+            "other"
+        ]
+        result = intent_classifier(text, candidate_labels)
+        if result and 'labels' in result and result['labels']:
+            intent = result['labels'][0]
+
+    return {
+        'entities': entities,
+        'topics': topics,
+        'intent': intent
+    }
+import re
+from typing import Optional
+from datetime import timezone, datetime, timedelta
+import pytz
+import sqlite3
+import json
+import aiohttp
+import tempfile
 
 # Set up logging
 logging.basicConfig(
@@ -69,12 +255,15 @@ client = OpenAI(api_key=XAI_KEY, base_url="https://api.x.ai/v1")
 
 bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
 
-# Track search context for follow-up queries
 search_context = {}  # {channel_id: {user_id: {searched_user: User, messages: [...], query: str}}}
 
 # SQLite database for conversation history
 DB_PATH = os.getenv('CONVERSATION_DB_PATH', 'data/conversation_history.db')
 CONVERSATION_RETENTION_HOURS = int(os.getenv('CONVERSATION_RETENTION_HOURS', '24'))
+
+
+# --- Only start the bot if running as main script ---
+# Place at the very end of the file to ensure all functions are defined
 
 def init_conversation_db():
     """Initialize SQLite database for conversation history"""
@@ -96,7 +285,7 @@ def init_conversation_db():
             user_query TEXT NOT NULL,
             bot_response TEXT NOT NULL,
             model_used TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
         )
     ''')
     
@@ -119,11 +308,12 @@ def store_conversation(message_id: int, channel_id: int, author_id: int,
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
+        now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
         cursor.execute('''
             INSERT OR REPLACE INTO conversations 
-            (message_id, channel_id, author_id, user_query, bot_response, model_used)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (message_id, channel_id, author_id, user_query, bot_response, model_used))
+            (message_id, channel_id, author_id, user_query, bot_response, model_used, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (message_id, channel_id, author_id, user_query, bot_response, model_used, now_iso))
         
         conn.commit()
         conn.close()
@@ -165,8 +355,7 @@ def cleanup_old_conversations():
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        cutoff_time = datetime.now() - timedelta(hours=CONVERSATION_RETENTION_HOURS)
-        
+        cutoff_time = (datetime.now(timezone.utc) - timedelta(hours=CONVERSATION_RETENTION_HOURS)).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
         cursor.execute('''
             DELETE FROM conversations
             WHERE created_at < ?
@@ -758,23 +947,42 @@ async def should_search_discord_history(message_content, has_mentions):
     """
     content_lower = message_content.lower()
     
+
+    # 0. BOT STATUS CHECKS - If the query is just a ping or status check, do NOT trigger Discord search
+    bot_ping_phrases = [
+        "are you there", "are you working", "are you online", "are you up", "are you alive", "yo", "ping", "test", "hello", "hi", "hey", "you here", "up?", "working?", "online?", "alive?", "present?", "awake?"
+    ]
+    if has_mentions and any(phrase in content_lower for phrase in bot_ping_phrases):
+        logger.info('Bot ping/status check detected, not a Discord search')
+        return False, None, None
+
     # 1. STRONGEST SIGNALS - Instant match (no API call needed)
     if has_mentions:
         logger.info('Discord search detected: user mention found')
         # Extract time period if present
         time_limit = extract_time_period(content_lower)
+        # Extract keywords, but only use for filtering if they are meaningful
         keywords = extract_keywords(content_lower)
+        # Define a set of non-meaningful keywords (stopwords, pronouns, etc.)
+        non_meaningful = {"we", "us", "our", "discord", "chat", "talking", "about", "in", "the", "what", "are", "is", "on", "this", "server", "channel"}
+        if not keywords or keywords.lower() in non_meaningful:
+            keywords = None  # Don't use for filtering
         return True, time_limit, keywords
     
-    # Check for explicit Discord scope indicators
+    # Check for explicit Discord scope indicators, but avoid false positives for pings/status checks
     discord_scope_keywords = [
-        "here", "in here", "this channel", "this server", 
+        "in here", "this channel", "this server", 
         "on this server", "in this chat", "in chat",
         "this discord", "on this discord", "in this discord", "in the discord", "in discord",
         "of this discord", "of this server", "of this channel",
         "the discord", "the server", "the channel"
     ]
-    if any(scope in content_lower for scope in discord_scope_keywords):
+    # Only match 'here' as a scope keyword if not part of a ping/status check
+    ping_phrases_with_here = [
+        "you here", "are you here", "yo here", "here?", "here .", "here!", "here "
+    ]
+    is_ping_with_here = any(phrase in content_lower for phrase in ping_phrases_with_here)
+    if any(scope in content_lower for scope in discord_scope_keywords) or ("here" in content_lower and not is_ping_with_here):
         logger.info('Discord search detected: explicit scope keyword')
         time_limit = extract_time_period(content_lower)
         keywords = extract_keywords(content_lower)
@@ -883,23 +1091,22 @@ def extract_time_period(content_lower):
     return None  # No time period specified
 
 def extract_keywords(content_lower):
-    """Extract topic keywords from the query"""
-    # Look for "about X", "regarding X", "discussing X", etc.
-    keyword_patterns = [
-        r'about\s+(\w+)',
-        r'regarding\s+(\w+)',
-        r'discussing\s+(\w+)',
-        r'mentioned\s+(\w+)',
-        r'talked about\s+(\w+)',
-    ]
-    
-    for pattern in keyword_patterns:
-        match = re.search(pattern, content_lower)
-        if match:
-            keyword = match.group(1)
-            logger.debug(f'Keyword extracted: {keyword}')
-            return keyword
-    
+    """Extract topic keywords and entities from the query using advanced NLP."""
+    nlp_results = advanced_nlp_parse(content_lower)
+    # Prefer named entities and noun chunks as keywords
+    keywords = []
+    if nlp_results['entities']:
+        keywords.extend([ent[0] for ent in nlp_results['entities']])
+    if nlp_results['topics']:
+        keywords.extend(nlp_results['topics'])
+    # Remove duplicates, preserve order
+    seen = set()
+    keywords = [x for x in keywords if not (x in seen or seen.add(x))]
+    # Log extracted info
+    logger.info(f"NLP Extracted entities: {nlp_results['entities']}, topics: {nlp_results['topics']}, intent: {nlp_results['intent']}")
+    # Return the most relevant keyword or a comma-separated string
+    if keywords:
+        return ', '.join(keywords)
     return None
 
 async def classify_with_grok(message_content):
@@ -991,30 +1198,39 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
         async for msg in message.channel.history(limit=max_scan):
             # Skip the command message
             if msg.id == message.id:
+                logger.debug(f"Skipping command message id={msg.id}")
                 continue
-            
+
             messages_scanned += 1
-            
-            # Apply filters
+
+            # Apply filters, but log why messages are skipped
             if target_user and msg.author != target_user:
+                logger.debug(f"Skipping message id={msg.id} (author {msg.author} != target_user {target_user})")
                 continue
-            
+
             if not target_user and msg.author.bot:
+                logger.debug(f"Skipping message id={msg.id} (author is bot)")
                 continue
-            
+
             if use_keyword_filter and keywords.lower() not in msg.content.lower():
+                logger.debug(f"Skipping message id={msg.id} (keyword '{keywords}' not in content)")
                 continue
-            
+
+            # Only skip empty messages (no content) for non-targeted searches
+            if not msg.content.strip():
+                logger.debug(f"Skipping message id={msg.id} (empty content)")
+                continue
+
             collected_messages.append(msg)
-            
+
             # Update progress every 2000 messages
             if messages_scanned - last_update >= 2000:
                 last_update = messages_scanned
                 try:
                     progress_pct = int((messages_scanned / time_limit) * 100)
                     await searching_msg.edit(content=f"🔍 Analyzing... ({progress_pct}% - scanned {messages_scanned:,}, found {len(collected_messages):,})")
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Progress update failed: {e}")
         
         if not collected_messages:
             await searching_msg.edit(content=f"❌ No messages found matching your criteria.")
@@ -1026,8 +1242,20 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
         messages_to_analyze = min(len(collected_messages), MAX_MESSAGES_ANALYZED)
         messages_for_context = collected_messages[:messages_to_analyze]
         
-        # Create message context with numbers for citations
-        context_parts = [f"User query: {query}\n"]
+        # Explicitly tell Grok that @gronk and 'gronk' refer to the AI itself, and place this at the top of the prompt
+        context_parts = [
+            (
+                "SYSTEM: You are 'gronk', the AI assistant and Discord bot. 'gronk' is a Discord bot interface for interacting with Grok the AI. "
+                "Any mention of 'gronk' or '@gronk' in the following messages refers to you, the AI, and NEVER the user. "
+                "Never refer to the user as 'gronk' or '@gronk'. Always refer to yourself as 'gronk' or '@gronk' when those names are mentioned. "
+                "You are the AI behind the 'gronk' Discord bot, and all responses from 'gronk' are from the AI assistant. "
+                "When referring to users, use either their mention or their user ID, but not both in the same phrase. Avoid redundant references like '@username (user ID @123)'. "
+                "NEVER output patterns like '@useridnumber (which appears to be @gronk)', '@useridnumber (which is @gronk)', or any similar construction. If a user is the bot, always use only '@gronk' and never the user ID or both together.\n"
+            ),
+            f"User query: {query}\n"
+        ]
+
+
         if target_user:
             context_parts.append(f"Analyzing user {target_user.name}'s messages (showing {messages_to_analyze} of {len(collected_messages)} found, oldest to newest):\n")
         else:
@@ -1041,20 +1269,42 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
             author_name = msg.author.name if not target_user else ""
             content = msg.content[:300] + "..." if len(msg.content) > 300 else msg.content
             message_number_map[i] = msg
+            # Provide real metadata for each message in the JSON block only, not in the visible context
+            # Visible context: just number, timestamp, author, and content
             if target_user:
                 context_parts.append(f"[{i}] [{timestamp_str}] {content}")
             else:
                 context_parts.append(f"[{i}] [{timestamp_str}] {author_name}: {content}")
-        
-        context_parts.append(f"\n\nBased on these messages, answer: {query}")
-        context_parts.append("\n\nIMPORTANT CITATION GUIDELINES:")
-        context_parts.append("- Cite key messages that support your main points (aim for 3-6 total citations)")
-        context_parts.append("- Be selective - don't cite every message, but DO cite your evidence")
-        context_parts.append("- NEVER use ranges like [#5-#10] - only cite individual messages: [#5], [#7], [#10]")
-        context_parts.append("- Use EXACTLY this format: [#N] where N is the message number")
-        context_parts.append("- Examples: [#5] or [#12]. Multiple: [#3], [#7], and [#12]")
-        context_parts.append("- Do NOT add any extra text or context inside the brackets")
-        context_parts.append(f"\n\nNote: All timestamps are in {TIMEZONE.zone} timezone.")
+            # Metadata for JSON block (unchanged, used later)
+            # meta = { ... }
+
+
+        # Add message metadata mapping for Grok to use in citations
+        context_parts.append("\n\nMessage Metadata Mapping:")
+        for i, msg in enumerate(reversed(messages_for_context), 1):
+            context_parts.append(f"{i}: {{'message_id': '{msg.id}', 'channel_id': '{msg.channel.id}', 'user_id': '{msg.author.id}', 'excerpt': '{msg.content[:80].replace('\\', ' ').replace('"', '\'' )}', 'link': 'https://discord.com/channels/{msg.guild.id}/{msg.channel.id}/{msg.id}'}}")
+
+        # (Instruction moved to top of prompt for clarity)
+
+        # INSTRUCT GROK TO REPLY ONLY WITH JSON and use only [#N] for citations, using the above mapping for sources
+        context_parts.append(f"\n\nBased on these messages, reply ONLY with a single JSON object in the following format. Do NOT include any natural language or commentary before or after the JSON. Only cite the most meaningful and relevant messages (typically 3-6), and do NOT cite every message. For each citation in your answer, use the metadata from the mapping above for the corresponding number in the 'sources' field.\n")
+        context_parts.append("""
+{
+    \"answer\": \"<your answer, with inline citations like [#N] ONLY. Do NOT include channel names, emojis, or any extra formatting in the citations. Use only [#N] for each citation.>\",
+    \"sources\": {
+        \"N\": {
+            \"message_id\": \"<discord message id from mapping>\",
+            \"channel_id\": \"<discord channel id from mapping>\",
+            \"user_id\": \"<discord user id from mapping>\",
+            \"excerpt\": \"<short excerpt from the message>\",
+            \"link\": \"<discord message link from mapping>\"
+        },
+        ...
+    },
+    \"confidence\": <float between 0 and 1>
+}
+""")
+        context_parts.append("\nIMPORTANT: For every citation, use ONLY the format [#N] with no channel name, emoji, or extra formatting. Example: [#1], [#2], etc.\n")
         full_prompt = "\n".join(context_parts)
         
         # Query Grok
@@ -1063,7 +1313,6 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
                 "model": GROK_TEXT_MODEL,
                 "messages": [{"role": "user", "content": full_prompt}]
             }
-            
             if ENABLE_WEB_SEARCH:
                 request_params["extra_body"] = {
                     "search_parameters": {
@@ -1071,95 +1320,137 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
                         "max_search_results": MAX_SEARCH_RESULTS
                     }
                 }
-            
             completion = client.chat.completions.create(**request_params)
+
             response = completion.choices[0].message.content
-            
-            # Clean up malformed citations (e.g., #248(⁠post-election-year-hate-dome⁠) -> #248)
-            # First, remove channel names from citations
-            malformed_citation_pattern = r'#(\d+)\([^)]*\)'
-            response = re.sub(malformed_citation_pattern, r'#\1', response)
-            
-            # Now convert citations to bracketed format
-            # First handle ranges like #140-#141-#142 or #727-#1000 -> [#140-#141-#142]
-            # The pattern matches: #<num>-#<num> or #<num>-<num>-#<num> etc.
-            # Must not already be inside brackets
-            range_bare_pattern = r'(?<!\[)#(\d+(?:-#?\d+)+)(?!\])'
-            response = re.sub(range_bare_pattern, r'[#\1]', response)
-            
-            # Then handle individual citations #N -> [#N]
-            # Must not be: already in brackets, followed by dash (part of range), or followed by ]
-            bare_citation_pattern = r'(?<!\[)#(\d+)(?![\d\-\)\]])'
-            response = re.sub(bare_citation_pattern, r'[#\1]', response)
-            
-            # Process citations
-            citation_pattern = r'\[#(\d+)\]'
-            range_pattern = r'\[#(\d+)-#?(\d+)\]'  # Matches [#497-502], [#88-#90]
-            
-            def replace_citation(match):
-                pos = match.start()
-                after_pos = match.end()
-                
-                if after_pos < len(response) - 2 and response[after_pos:after_pos+2] == '](':
-                    return match.group(0)
-                
-                if after_pos < len(response) and response[after_pos:after_pos+1] == '-':
-                    return match.group(0)
-                if pos > 0 and response[pos-1:pos] == '-':
-                    return match.group(0)
-                
-                msg_num = int(match.group(1))
-                if msg_num in message_number_map:
-                    msg = message_number_map[msg_num]
-                    msg_link = f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{msg.id}"
-                    return f"[#{msg_num}]({msg_link})"
-                return match.group(0)
-            
-            def replace_range(match):
-                start_num = int(match.group(1))
-                end_num = int(match.group(2))
-                links = []
-                for msg_num in range(start_num, end_num + 1):
-                    if msg_num in message_number_map:
-                        msg = message_number_map[msg_num]
-                        msg_link = f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{msg.id}"
-                        links.append(f"[#{msg_num}]({msg_link})")
-                    else:
-                        links.append(f"[#{msg_num}]")
-                return "-".join(links) if links else match.group(0)
-            
-            response = re.sub(range_pattern, replace_range, response)
-            response = re.sub(citation_pattern, replace_citation, response)
-            
-            # Convert Discord usernames to mentions
-            response = convert_usernames_to_mentions(response, message.guild)
-            
-            # Calculate cost
-            request_cost = 0
-            usage_text = ""
-            if hasattr(completion, 'usage') and completion.usage:
-                if hasattr(completion.usage, 'prompt_tokens_details') and completion.usage.prompt_tokens_details:
-                    cached = completion.usage.prompt_tokens_details.cached_tokens
-                    uncached = completion.usage.prompt_tokens - cached
-                    input_cost = (uncached / 1_000_000) * GROK_TEXT_INPUT_COST + (cached / 1_000_000) * GROK_TEXT_CACHED_COST
-                else:
-                    input_cost = (completion.usage.prompt_tokens / 1_000_000) * GROK_TEXT_INPUT_COST
-                output_cost = (completion.usage.completion_tokens / 1_000_000) * GROK_TEXT_OUTPUT_COST
-                request_cost = input_cost + output_cost
-                usage_text = f"💵 ${request_cost:.6f} • {completion.usage.prompt_tokens} in / {completion.usage.completion_tokens} out"
-            
+
+
+
+
+            # --- Begin JSON extraction and parsing ---
+            import json as _json
+            import re as _re
+            json_match = _re.search(r'\{[\s\S]*\}$', response)
+            if json_match:
+                json_str = json_match.group(0)
+                try:
+                    data = _json.loads(json_str)
+                    answer = data.get("answer", "")
+                    sources = data.get("sources", {})
+                except Exception as e:
+                    answer = response
+                    sources = {}
+            else:
+                answer = response
+                sources = {}
+
+            # Only use the answer field for the embed description
+            # Replace [#N] in the answer with clickable links using the sources map (if available)
+            def replace_citation_with_link(match):
+                num = match.group(1)
+                if sources and num in sources:
+                    meta = sources[num]
+                    link = meta.get("link")
+                    if link and link.startswith("https://discord.com/channels/"):
+                        return f"[#{num}](<{link}>)"
+                return f"[#{num}]"
+
+            answer = re.sub(r'\[#(\d+)\]', replace_citation_with_link, answer)
+
+
+            # Add spacing between consecutive citations (e.g., [#1][#2] -> [#1] [#2])
+            answer = re.sub(r'(\]\[)', '] [', answer)
+
+            # Replace user IDs or usernames in the answer with Discord mention links if possible
+            # Build a user_id to mention mapping from sources
+            user_id_to_mention = {}
+            for src in sources.values():
+                uid = src.get("user_id")
+                if uid:
+                    user_id_to_mention[uid] = f'<@{uid}>'
+
+            # Optionally, build a username to mention mapping if usernames are present in excerpts
+            # (This is less reliable, but can help if usernames are referenced directly)
+            username_to_mention = {}
+            for src in sources.values():
+                excerpt = src.get("excerpt", "")
+                uid = src.get("user_id")
+                if uid and message.guild:
+                    member = message.guild.get_member(int(uid))
+                    if member:
+                        username_to_mention[member.name] = f'<@{uid}>'
+                        username_to_mention[member.display_name] = f'<@{uid}>'
+
+
+            # Get bot user ID and mention
+            bot_mention = None
+            bot_user_id = None
+            if message.guild:
+                bot_member = message.guild.get_member(message.guild.me.id)
+                if bot_member:
+                    bot_mention = bot_member.mention
+                    bot_user_id = str(bot_member.id)
+
+            # Replace all occurrences of '@gronk' (case-insensitive, not already a mention) with the bot mention
+            if bot_mention:
+                answer = re.sub(r'(?<!<@)@?gronk(?!>)', bot_mention, answer, flags=re.IGNORECASE)
+
+            # Replace user IDs with mentions, but skip the bot's user ID (already handled by @gronk logic)
+            for uid, mention in user_id_to_mention.items():
+                if bot_user_id and uid == bot_user_id:
+                    continue  # skip bot user id
+                answer = answer.replace(uid, mention)
+
+            # Replace any username with a mention (avoid double-mentioning if already replaced)
+            for uname, mention in username_to_mention.items():
+                # Only replace if not already a mention and not 'gronk'
+                if uname.lower() != 'gronk':
+                    answer = re.sub(rf'(?<!<@){re.escape(uname)}(?!>)', mention, answer)
+
+            # Remove redundant patterns: @gronk (user ID @botid) or @gronk (user ID botid)
+            if bot_mention and bot_user_id:
+                answer = re.sub(rf'{re.escape(bot_mention)} ?\(user ID ?<?@!?{bot_user_id}>?\)', bot_mention, answer)
+                answer = re.sub(rf'{re.escape(bot_mention)} ?\(user ID ?{bot_user_id}\)', bot_mention, answer)
+
+
+        # Convert any remaining Discord usernames to mentions (fallback)
+        answer = convert_usernames_to_mentions(answer, message.guild)
+
+        # Remove redundant user mention and user ID pairs, e.g., '@username (user ID @123)' or '@123 (which is @username)'
+        # Remove patterns like: @username (user ID @username) or @userID (which is @username)
+        answer = re.sub(r'(\<@!?\d+\>) ?\(user ID \1\)', r'\1', answer)
+        answer = re.sub(r'(\<@!?\d+\>) ?\(which is \1\)', r'\1', answer)
+        # Remove patterns like: @username (user ID @1234567890)
+        answer = re.sub(r'(\<@!?\d+\>) ?\(user ID @\d+\)', r'\1', answer)
+        # Remove patterns like: @1234567890 (which is @username)
+        answer = re.sub(r'(@\d+) ?\(which is \<@!?\d+\>\)', r'\1', answer)
+
+        # Calculate cost
+        request_cost = 0
+        usage_text = ""
+        if hasattr(completion, 'usage') and completion.usage:
+            if hasattr(completion.usage, 'prompt_tokens_details') and completion.usage.prompt_tokens_details:
+                cached = completion.usage.prompt_tokens_details.cached_tokens
+                uncached = completion.usage.prompt_tokens - cached
+                input_cost = (uncached / 1_000_000) * GROK_TEXT_INPUT_COST + (cached / 1_000_000) * GROK_TEXT_CACHED_COST
+            else:
+                input_cost = (completion.usage.prompt_tokens / 1_000_000) * GROK_TEXT_INPUT_COST
+            output_cost = (completion.usage.completion_tokens / 1_000_000) * GROK_TEXT_OUTPUT_COST
+            request_cost = input_cost + output_cost
+            usage_text = f"💵 ${request_cost:.6f} • {completion.usage.prompt_tokens} in / {completion.usage.completion_tokens} out"
+
             await searching_msg.delete()
-            
-            # Create embed(s) - split if response is too long
+
+            # Only show the answer (with inline citations), no separate sources or confidence
             title = "🔍 Discord History Analysis"
             if target_user:
                 title += f": {target_user.display_name}"
-            
-            if len(response) <= 4096:
-                # Single embed
+            if len(answer) <= 4096:
+
+
                 embed = discord.Embed(
                     title=title,
-                    description=response,
+                    description=answer,
                     color=discord.Color.purple(),
                     timestamp=message.created_at
                 )
@@ -1167,28 +1458,18 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
                     name="Grok Analysis",
                     icon_url="https://pbs.twimg.com/profile_images/1683899100922511378/5lY42eHs_400x400.jpg"
                 )
-                
                 analyzed_text = f"{messages_to_analyze} messages analyzed"
                 if len(collected_messages) > messages_to_analyze:
                     analyzed_text += f" ({len(collected_messages)} found)"
-                
-                # Add oldest message date
                 if messages_for_context:
-                    oldest_msg = messages_for_context[-1]  # Last in list (reversed for chronological)
+                    oldest_msg = messages_for_context[-1]
                     oldest_date = oldest_msg.created_at.astimezone(TIMEZONE)
-                    analyzed_text += f"\nOldest: {oldest_date.strftime('%Y-%m-%d %H:%M %Z')}"
-                
-                embed.add_field(
-                    name="Analyzed",
-                    value=analyzed_text,
-                    inline=False
-                )
-                
+                    analyzed_text += f" • Oldest: {oldest_date.strftime('%Y-%m-%d %H:%M %Z')}"
+                # Removed the 'Analyzed' field for a cleaner embed
                 footer_text = f"Requested by {message.author.display_name}"
                 if usage_text:
                     footer_text += f" • {usage_text}"
                 embed.set_footer(text=footer_text, icon_url=message.author.avatar.url if message.author.avatar else None)
-                
                 await message.reply(embed=embed)
             else:
                 # Split into multiple embeds
@@ -1271,11 +1552,7 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
                             oldest_date = oldest_msg.created_at.astimezone(TIMEZONE)
                             analyzed_text += f"\nOldest: {oldest_date.strftime('%Y-%m-%d %H:%M %Z')}"
                         
-                        embed.add_field(
-                            name="Analyzed",
-                            value=analyzed_text,
-                            inline=False
-                        )
+                        # Removed the 'Analyzed' field for a cleaner embed
                         footer_text = f"Requested by {message.author.display_name}"
                         if usage_text:
                             footer_text += f" • {usage_text}"
@@ -1294,34 +1571,56 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
 
 @bot.event
 async def on_message(message):
+
     if message.author == bot.user:
         return
+
+    # Initialize variables to avoid NameError
+    image_urls = []
+    unsupported_images = []
+    document_attachments = []
+    unsupported_docs = []
+    use_conversation_history = False
+    conversation_messages = []
+
+    # Helper: check if image URL/filename is supported
+    def is_supported_image(url_or_filename):
+        url = url_or_filename.lower()
+        return url.endswith('.jpg') or url.endswith('.jpeg') or url.endswith('.png') or url.endswith('.webp')
+
+    # Helper: check if document filename is supported
+    def is_supported_document(filename):
+        filename = filename.lower()
+        return filename.endswith('.pdf') or filename.endswith('.docx') or filename.endswith('.txt')
 
     # Check if bot is mentioned OR if user is replying to bot's message
     is_bot_mentioned = bot.user in message.mentions
     is_replying_to_bot = False
-    
+
     if message.reference:
         try:
             replied_msg = await message.channel.fetch_message(message.reference.message_id)
             is_replying_to_bot = replied_msg.author == bot.user
         except:
             pass
-    
+
     if is_bot_mentioned or is_replying_to_bot:
         if is_replying_to_bot:
             logger.info(f'Bot reply detected from {message.author} in #{message.channel}')
         else:
             logger.info(f'Bot mentioned by {message.author} in #{message.channel}')
-        
-        # Build context if this is a reply
-        prompt = message.content.replace(f'<@{bot.user.id}>', '').replace(f'<@!{bot.user.id}>', '').strip()
-        
+
+        # Normalize prompt: remove all bot mentions and extra whitespace
+        prompt = message.content
+        prompt = re.sub(r'<@!?'+str(bot.user.id)+r'>', '', prompt)
+        prompt = prompt.strip()
+        logger.info(f'Normalized prompt for intent detection: "{prompt}"')
+
         # Check if this is a Discord history analysis query (if feature enabled)
         if ENABLE_NL_HISTORY_SEARCH:
             target_user = message.mentions[0] if message.mentions and message.mentions[0] != bot.user else None
             should_search, time_limit, keywords = await should_search_discord_history(prompt, target_user is not None)
-            
+            logger.info(f'should_search_discord_history result: should_search={should_search}, time_limit={time_limit}, keywords={keywords}')
             if should_search:
                 logger.info(f'Discord history search triggered for query: {prompt}')
                 await perform_discord_history_search(
@@ -1337,130 +1636,74 @@ async def on_message(message):
         is_search_followup = False
         conversation_context = []
         
-        if is_replying_to_bot:
-            try:
-                replied_msg = await message.channel.fetch_message(message.reference.message_id)
-                
-                # Check if the replied message was a search result
-                if replied_msg.embeds and replied_msg.embeds[0].title and "Search Results" in replied_msg.embeds[0].title:
-                    if message.channel.id in search_context and message.author.id in search_context[message.channel.id]:
-                        is_search_followup = True
-                        logger.info(f'Detected search follow-up query')
-                        
-                        # Get stored search context
-                        ctx_data = search_context[message.channel.id][message.author.id]
-                        searched_user = ctx_data['searched_user']
-                        user_messages = ctx_data['messages']
-                        
-                        # Build context with previous search data (same as in search command)
-                        messages_to_analyze = min(len(user_messages), 100)
-                        messages_for_context = user_messages[:messages_to_analyze]
-                        
-                        # Create message number mapping for citation linking
-                        message_number_map = {}
-                        context_parts = [
-                            f"Previous search was about {'user ' + searched_user.name if searched_user else 'channel history'}.",
-                            f"Follow-up query: {prompt}\n",
-                            f"\n{'User ' + searched_user.name if searched_user else 'Channel'} messages (showing {messages_to_analyze} of {len(user_messages)} found, from oldest to newest):\n"
-                        ]
-                        
-                        for i, msg in enumerate(reversed(messages_for_context), 1):
-                            # Convert UTC timestamp to configured timezone
-                            timestamp_local = msg.created_at.astimezone(TIMEZONE)
-                            tz_abbr = timestamp_local.strftime("%Z")
-                            timestamp_str = timestamp_local.strftime(f"%Y-%m-%d %H:%M {tz_abbr}")
-                            content = msg.content[:300] + "..." if len(msg.content) > 300 else msg.content
-                            message_number_map[i] = msg  # Store mapping for citation linking
-                            context_parts.append(f"[{i}] [{timestamp_str}] {content}")
-                        
-                        context_parts.append(f"\n\nAnswer this follow-up question: {prompt}")
-                        context_parts.append("\n\nIMPORTANT CITATION GUIDELINES:")
-                        context_parts.append("- Cite key messages that support your main points (aim for 3-6 total citations)")
-                        context_parts.append("- Be selective - don't cite every message, but DO cite your evidence")
-                        context_parts.append("- NEVER use ranges like [#5-#10] - only cite individual messages: [#5], [#7], [#10]")
-                        context_parts.append("- Use EXACTLY this format: [#N] where N is the message number")
-                        context_parts.append("- Examples: [#5] or [#12]. Multiple: [#3], [#7], and [#12]")
-                        context_parts.append("- Do NOT add any extra text or context inside the brackets")
-                        context_parts.append("\n\nNote: Custom Discord emojis appear as <:emoji_name:emoji_id>. When quoting messages with emojis, preserve this exact format.")
-                        tz_name = TIMEZONE.zone
-                        context_parts.append(f"\n\nNote: All timestamps are in {tz_name} timezone.")
-                        prompt = "\n".join(context_parts)
-                        logger.info(f'Built search follow-up context with {len(user_messages)} messages')
-                
-            except Exception as e:
-                logger.warning(f'Error fetching conversation context: {e}')
-        
-        # Get conversation history based on the thread being replied to
-        # This will traverse the reply chain to build full conversation context
-        conversation_messages = []
-        use_conversation_history = False
-        replied_msg_id = None
-        
-        if is_replying_to_bot and not is_search_followup:
-            try:
-                # Traverse the entire reply chain to build full conversation history
-                reply_chain = []
-                current_message = message
-                max_depth = 10
-                depth = 0
-                
-                # Walk backwards through the reply chain
-                while current_message.reference and depth < max_depth:
-                    try:
-                        replied_message = await message.channel.fetch_message(current_message.reference.message_id)
-                        reply_chain.insert(0, replied_message)
-                        current_message = replied_message
-                        depth += 1
-                    except:
-                        break
-                
-                logger.info(f'Found {len(reply_chain)} messages in bot reply chain')
-                
-                # Build conversation messages from the reply chain
-                for msg in reply_chain:
-                    conv = get_conversation(msg.id)
-                    if conv:
-                        # Add the user query and bot response
-                        conversation_messages.append({"role": "user", "content": conv['user_query']})
-                        conversation_messages.append({"role": "assistant", "content": conv['bot_response']})
-                
-                if conversation_messages:
-                    use_conversation_history = True
-                    logger.info(f'Built conversation history with {len(conversation_messages)} messages from reply chain')
-                else:
-                    logger.info(f'No conversation history found in reply chain')
-            except Exception as e:
-                logger.warning(f'Error building conversation thread: {e}')
-        logger.info(f'Extracted prompt: "{prompt}"')
-        
-        # Helper function to check if URL is a supported image type
-        def is_supported_image(url):
-            """Check if URL ends with supported image extensions"""
-            supported_extensions = ['.jpg', '.jpeg', '.png', '.webp']
-            url_lower = url.lower().split('?')[0]  # Remove query params
-            return any(url_lower.endswith(ext) for ext in supported_extensions)
-        
-        # Collect images from the current message
-        image_urls = []
-        unsupported_images = []
-        
-        # Check for direct attachments
-        for attachment in message.attachments:
-            if attachment.content_type and attachment.content_type.startswith('image/'):
-                if is_supported_image(attachment.url) or attachment.content_type in ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']:
+
+        if is_bot_mentioned or is_replying_to_bot:
+            if is_replying_to_bot:
+                logger.info(f'Bot reply detected from {message.author} in #{message.channel}')
+            else:
+                logger.info(f'Bot mentioned by {message.author} in #{message.channel}')
+
+            # Normalize prompt: remove all bot mentions and extra whitespace
+            prompt = message.content
+            prompt = re.sub(r'<@!?'+str(bot.user.id)+r'>', '', prompt)
+            prompt = prompt.strip()
+            logger.info(f'Normalized prompt for intent detection: "{prompt}"')
+
+            # --- IMAGE GENERATION NATURAL LANGUAGE DETECTION ---
+            # Use advanced_nlp_parse to extract intent and topics
+            nlp_result = advanced_nlp_parse(prompt)
+            image_intent_phrases = [
+                'generate an image', 'generate me an image', 'create an image', 'draw an image',
+                'make an image', 'image of', 'picture of', 'show me an image', 'show me a picture',
+                'visualize', 'illustrate', 'art of', 'artwork of', 'paint', 'sketch', 'render', 'grok, make me an image', 'grok, generate an image'
+            ]
+            # Lowercase for matching
+            prompt_lower = prompt.lower()
+            is_image_request = any(phrase in prompt_lower for phrase in image_intent_phrases)
+            # Also check for intent label if using zero-shot
+            if nlp_result.get('intent') and 'image' in nlp_result['intent'].lower():
+                is_image_request = True
+            # If detected, call imagine logic directly
+            if is_image_request:
+                logger.info('Detected image generation intent in natural language')
+                class DummyCtx:
+                    def __init__(self, message):
+                        self.message = message
+                        self.author = message.author
+                        self.channel = message.channel
+                        self.guild = message.guild
+                        self.trigger_typing = message.channel.typing
+                        self.reply = message.reply
+                ctx = DummyCtx(message)
+                await imagine(ctx, prompt=prompt)
+                return
+
+            # --- END IMAGE GENERATION DETECTION ---
+
+            # Existing natural language Discord history detection and follow-up logic...
+            # ...existing code...
+            for attachment in message.attachments:
+                if is_supported_image(attachment.url) or (attachment.content_type and attachment.content_type in ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']):
                     image_urls.append(attachment.url)
                     logger.info(f'Found image attachment: {attachment.filename}')
+                elif is_supported_document(attachment.filename):
+                    document_attachments.append(attachment)
+                    logger.info(f'Found document attachment: {attachment.filename}')
                 else:
-                    unsupported_images.append(attachment.filename)
-                    logger.warning(f'Unsupported image type: {attachment.filename} ({attachment.content_type})')
-        
-        # Check for image URLs in message content (links to images)
-        image_url_pattern = r'https?://(?:[a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,}(?:/[^\s]*)?\.(?:jpg|jpeg|png|webp)(?:\?[^\s]*)?'
-        found_urls = re.findall(image_url_pattern, message.content, re.IGNORECASE)
-        for url in found_urls:
-            if url not in image_urls:
-                image_urls.append(url)
-                logger.info(f'Found image URL in message: {url}')
+                    if not attachment.content_type or not attachment.content_type.startswith('image/'):
+                        unsupported_docs.append(attachment.filename)
+                        logger.warning(f'Unsupported document type: {attachment.filename} ({attachment.content_type})')
+                    else:
+                        unsupported_images.append(attachment.filename)
+                        logger.warning(f'Unsupported image type: {attachment.filename} ({attachment.content_type})')
+
+            # Check for image URLs in message content (links to images)
+            image_url_pattern = r'https?://(?:[a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,}(?:/[^\s]*)?\.(?:jpg|jpeg|png|webp)(?:\?[^\s]*)?'
+            found_urls = re.findall(image_url_pattern, message.content, re.IGNORECASE)
+            for url in found_urls:
+                if url not in image_urls:
+                    image_urls.append(url)
+                    logger.info(f'Found image URL in message: {url}')
         
         # Check for Discord CDN embeds (when links auto-embed like Tenor, Giphy, etc.)
         for embed in message.embeds:
@@ -1622,53 +1865,95 @@ async def on_message(message):
         
         # Query Grok
         try:
+            usage_text = ""
             async with message.channel.typing():
+                # Upload document files to Grok if present
+                grok_file_ids = []
+                if document_attachments:
+                    async with aiohttp.ClientSession() as session:
+                        for attachment in document_attachments:
+                            with tempfile.NamedTemporaryFile(delete=True) as tmp:
+                                await attachment.save(tmp.name)
+                                tmp.flush()
+                                files_url = "https://api.x.ai/v1/files"
+                                headers = {"Authorization": f"Bearer {XAI_KEY}"}
+                                with open(tmp.name, "rb") as f:
+                                    data = aiohttp.FormData()
+                                    data.add_field('file', f, filename=attachment.filename)
+                                    async with session.post(files_url, headers=headers, data=data) as resp:
+                                        if resp.status == 200:
+                                            result = await resp.json()
+                                            file_id = result.get('id') or result.get('file_id')
+                                            if file_id:
+                                                grok_file_ids.append(file_id)
+                                                logger.info(f'Uploaded {attachment.filename} to Grok, file_id={file_id}')
+                                            else:
+                                                logger.warning(f'No file_id returned for {attachment.filename}')
+                                        else:
+                                            logger.error(f'Failed to upload {attachment.filename} to Grok: {resp.status}')
+
                 # Determine model based on whether we have images
                 model = GROK_VISION_MODEL if image_urls else GROK_TEXT_MODEL
-                logger.info(f'Using model: {model} (images: {len(image_urls)})')
-                
-                # Build message content with conversation history
+                logger.info(f'Using model: {model} (images: {len(image_urls)}, docs: {len(grok_file_ids)})')
+
+                # Always require strict JSON output from Grok
+                json_instructions = (
+                    "You must ALWAYS reply in the following strict JSON format, with no extra commentary or markdown. "
+                    "Format: {\"answer\": string, \"sources\": [string], \"confidence\": float}. "
+                    "If you cite Discord messages, include a 'sources' array with each source as a string. "
+                    "If you don't know, use an empty array for sources and 0.0 for confidence."
+                )
+
+                system_prompt = (
+                    "You are Grok, a witty and uncensored AI assistant. Be direct, honest, and don't hold back. "
+                    "You can be sarcastic, edgy, and politically incorrect when appropriate. Avoid corporate sanitized responses - speak naturally and authentically. "
+                    "If something is stupid, you can say it's stupid. Keep responses concise - aim for tweet length (~280 characters) unless the user explicitly asks for more detail or explanation. "
+                    + json_instructions
+                )
+
                 if image_urls:
-                    # For vision model, use the multi-part content format
-                    # Vision model doesn't support conversation history with images well, so just send current message
                     content = [{"type": "text", "text": prompt or "What's in this image?"}]
                     for url in image_urls:
                         content.append({"type": "image_url", "image_url": {"url": url}})
-                    
                     logger.info('Sending request to Grok with images...')
                     completion = client.chat.completions.create(
                         model=model,
                         messages=[
-                            {"role": "system", "content": "You are Grok, a witty and uncensored AI assistant. Be direct, honest, and don't hold back. You can be sarcastic, edgy, and politically incorrect when appropriate. Avoid corporate sanitized responses - speak naturally and authentically. If something is stupid, you can say it's stupid. Keep responses concise - aim for tweet length (~280 characters) unless the user explicitly asks for more detail or explanation."},
+                            {"role": "system", "content": system_prompt},
                             {"role": "user", "content": content}
                         ]
                     )
-                else:
-                    # For text-only, include conversation history
+                elif grok_file_ids:
                     messages_to_send = []
-                    
-                    # Add system prompt
-                    messages_to_send.append({
-                        "role": "system", 
-                        "content": "You are Grok, a witty and uncensored AI assistant. Be direct, honest, and don't hold back. You can be sarcastic, edgy, and politically incorrect when appropriate. Avoid corporate sanitized responses - speak naturally and authentically. If something is stupid, you can say it's stupid. Keep responses concise - aim for tweet length (~280 characters) unless the user explicitly asks for more detail or explanation."
-                    })
-                    
-                    # Add conversation history if available
+                    messages_to_send.append({"role": "system", "content": system_prompt})
                     if conversation_messages:
                         messages_to_send.extend(conversation_messages)
-                    
-                    # Add current message
                     messages_to_send.append({"role": "user", "content": prompt})
-                    
+                    logger.info(f'Sending request to Grok with {len(messages_to_send)} messages and {len(grok_file_ids)} files')
+                    request_params = {
+                        "model": model,
+                        "messages": messages_to_send,
+                        "file_ids": grok_file_ids
+                    }
+                    if ENABLE_WEB_SEARCH:
+                        request_params["extra_body"] = {
+                            "search_parameters": {
+                                "mode": "auto",
+                                "max_search_results": MAX_SEARCH_RESULTS
+                            }
+                        }
+                    completion = client.chat.completions.create(**request_params)
+                else:
+                    messages_to_send = []
+                    messages_to_send.append({"role": "system", "content": system_prompt})
+                    if conversation_messages:
+                        messages_to_send.extend(conversation_messages)
+                    messages_to_send.append({"role": "user", "content": prompt})
                     logger.info(f'Sending text-only request to Grok with {len(messages_to_send)} messages (history: {len(conversation_messages)})')
-                    
-                    # Build request parameters
                     request_params = {
                         "model": model,
                         "messages": messages_to_send
                     }
-                    
-                    # Add search parameters if enabled
                     if ENABLE_WEB_SEARCH:
                         request_params["extra_body"] = {
                             "search_parameters": {
@@ -1676,11 +1961,104 @@ async def on_message(message):
                                 "max_search_results": MAX_SEARCH_RESULTS
                             }
                         }
-                    
                     completion = client.chat.completions.create(**request_params)
-                
+
                 response = completion.choices[0].message.content
                 logger.info(f'Received response from Grok ({len(response)} characters)')
+
+                # Calculate token usage and cost BEFORE parsing JSON/creating embed
+                usage_text = ""
+                if hasattr(completion, 'usage') and completion.usage:
+                    model_used = completion.model
+                    is_vision = 'vision' in model_used.lower()
+                    vision_cost = 0
+                    if is_vision:
+                        input_cost = (completion.usage.prompt_tokens / 1_000_000) * GROK_VISION_INPUT_COST
+                        output_cost = (completion.usage.completion_tokens / 1_000_000) * GROK_VISION_OUTPUT_COST
+                        vision_cost = input_cost + output_cost
+                    else:
+                        if hasattr(completion.usage, 'prompt_tokens_details') and completion.usage.prompt_tokens_details:
+                            cached = completion.usage.prompt_tokens_details.cached_tokens
+                            uncached = completion.usage.prompt_tokens - cached
+                            input_cost = (uncached / 1_000_000) * GROK_TEXT_INPUT_COST + (cached / 1_000_000) * GROK_TEXT_CACHED_COST
+                        else:
+                            input_cost = (completion.usage.prompt_tokens / 1_000_000) * GROK_TEXT_INPUT_COST
+                        output_cost = (completion.usage.completion_tokens / 1_000_000) * GROK_TEXT_OUTPUT_COST
+                    num_sources = getattr(completion.usage, 'num_sources_used', 0)
+                    search_cost = (num_sources / 1000) * GROK_SEARCH_COST if num_sources > 0 else 0
+                    request_cost = input_cost + output_cost + search_cost
+                    cost_str = f"💵 ${request_cost:.6f}"
+                    indicators = []
+                    if is_vision:
+                        indicators.append(f"👁️ ${vision_cost:.6f} vision")
+                    if search_cost > 0:
+                        indicators.append(f"🔍 ${search_cost:.6f} search")
+                    if indicators:
+                        cost_str += f" ({', '.join(indicators)})"
+                    usage_text = f"{cost_str} • {completion.usage.prompt_tokens} in / {completion.usage.completion_tokens} out"
+
+                # Always parse Grok's response as JSON
+                try:
+                    grok_json = json.loads(response)
+                except Exception as e:
+                    logger.error(f'Failed to parse Grok JSON: {e}\nRaw response: {response}')
+                    await message.reply("❌ Grok did not return valid JSON. Please try again.")
+                    return
+
+                # Build Discord embed from parsed JSON
+                answer = grok_json.get("answer", "(No answer)")
+                sources = grok_json.get("sources", [])
+                confidence = grok_json.get("confidence", None)
+
+                embed = discord.Embed(
+                    description=answer,
+                    color=discord.Color.blue(),
+                    timestamp=message.created_at
+                )
+                embed.set_author(
+                    name="Grok Response",
+                    icon_url="https://pbs.twimg.com/profile_images/1683899100922511378/5lY42eHs_400x400.jpg"
+                )
+                if sources:
+                    # For non-Discord queries, show only clickable links (not title and link)
+                    formatted_sources = []
+                    for src in sources:
+                        # If the source looks like a Markdown link [title](url), extract just the URL
+                        m = re.match(r"\[.*?\]\((https?://[^)]+)\)", src)
+                        if m:
+                            formatted_sources.append(m.group(1))
+                        # If the source is just a URL, keep as is
+                        elif re.match(r"https?://", src):
+                            formatted_sources.append(src)
+                        else:
+                            # If the source is a string with both title and URL separated by space, try to extract the URL
+                            m2 = re.search(r"(https?://\S+)", src)
+                            if m2:
+                                formatted_sources.append(m2.group(1))
+                            else:
+                                formatted_sources.append(src)
+                    embed.add_field(name="Sources", value="\n".join(formatted_sources), inline=False)
+                # Confidence score removed from embed as requested
+
+                footer_text = f"Requested by {message.author.display_name}"
+                if usage_text:
+                    footer_text += f" • {usage_text}"
+                embed.set_footer(text=footer_text, icon_url=message.author.avatar.url if message.author.avatar else None)
+
+                bot_message = await message.reply(embed=embed)
+
+                # Store conversation for future context
+                original_prompt = message.content.replace(f'<@{bot.user.id}>', '').replace(f'<@!{bot.user.id}>', '').strip()
+                store_conversation(
+                    message_id=bot_message.id,
+                    channel_id=message.channel.id,
+                    author_id=message.author.id,
+                    user_query=original_prompt,
+                    bot_response=answer,
+                    model_used=model
+                )
+                logger.info(f'Stored conversation history for bot message {bot_message.id} (asked by user {message.author.id})')
+                return  # Prevent duplicate messages
                 
                 # Process citations if this is a search follow-up with message_number_map
                 if is_search_followup and 'message_number_map' in locals():

@@ -1282,7 +1282,8 @@ async def perform_discord_history_search(message, query, time_limit=None, keywor
         # Add message metadata mapping for Grok to use in citations
         context_parts.append("\n\nMessage Metadata Mapping:")
         for i, msg in enumerate(reversed(messages_for_context), 1):
-            context_parts.append(f"{i}: {{'message_id': '{msg.id}', 'channel_id': '{msg.channel.id}', 'user_id': '{msg.author.id}', 'excerpt': '{msg.content[:80].replace('\\', ' ').replace('"', '\'' )}', 'link': 'https://discord.com/channels/{msg.guild.id}/{msg.channel.id}/{msg.id}'}}")
+            excerpt = msg.content[:80].replace('\\', ' ').replace('"', "'")
+            context_parts.append(f"{i}: {{'message_id': '{msg.id}', 'channel_id': '{msg.channel.id}', 'user_id': '{msg.author.id}', 'excerpt': '{excerpt}', 'link': 'https://discord.com/channels/{msg.guild.id}/{msg.channel.id}/{msg.id}'}}")
 
         # (Instruction moved to top of prompt for clarity)
 

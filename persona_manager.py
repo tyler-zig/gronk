@@ -9,13 +9,10 @@ from discord import Interaction, ui
 
 from config import (
     GROK_ANALYSIS_REASONING_EFFORT,
-    GROK_TEXT_CACHED_COST,
-    GROK_TEXT_INPUT_COST,
     GROK_TEXT_MODEL,
-    GROK_TEXT_OUTPUT_COST,
-    GROK_TOOL_COST,
     PERSONA_STORE_PATH,
 )
+from cost_utils import format_cost
 from grok_client import build_cache_conversation_id, sdk_chat_request
 from grok_schemas import PersonaDraft
 
@@ -76,17 +73,18 @@ def _ensure_store_dir():
 def _load_store():
     _ensure_store_dir()
     if not os.path.exists(PERSONA_STORE_PATH):
-        return {"personas": {}, "active_by_channel": {}}
+        return {"personas": {}, "active_by_channel": {}, "verbosity_by_channel": {}}
 
     try:
         with open(PERSONA_STORE_PATH, 'r', encoding='utf-8') as fh:
             data = json.load(fh)
         data.setdefault("personas", {})
         data.setdefault("active_by_channel", {})
+        data.setdefault("verbosity_by_channel", {})
         return data
     except Exception as e:
         logger.error(f'Error loading persona store: {e}', exc_info=True)
-        return {"personas": {}, "active_by_channel": {}}
+        return {"personas": {}, "active_by_channel": {}, "verbosity_by_channel": {}}
 
 
 def _save_store(data):
@@ -157,6 +155,19 @@ def set_active_persona(channel_id, persona_id):
 def clear_active_persona(channel_id):
     data = _load_store()
     data["active_by_channel"].pop(str(channel_id), None)
+    _save_store(data)
+
+
+def get_active_verbosity(channel_id):
+    """Return the verbosity level stored for a channel, or None."""
+    data = _load_store()
+    return data.get("verbosity_by_channel", {}).get(str(channel_id))
+
+
+def set_active_verbosity(channel_id, level: str):
+    """Persist a verbosity level for a channel."""
+    data = _load_store()
+    data.setdefault("verbosity_by_channel", {})[str(channel_id)] = level
     _save_store(data)
 
 
@@ -234,27 +245,16 @@ def clone_persona(source_persona_id, created_by, requested_name=None):
 
 
 def _usage_text(usage):
+    """Format cost from an SDK usage dict for persona embed footers."""
     if not usage:
         return ""
-
-    prompt_tokens = usage.get('prompt_tokens', 0)
-    completion_tokens = usage.get('completion_tokens', 0)
-    cached_tokens = usage.get('cached_tokens', 0)
-    tool_invocations = usage.get('tool_invocations', 0)
-    uncached_tokens = max(prompt_tokens - cached_tokens, 0)
-
-    input_cost = (
-        (uncached_tokens / 1_000_000) * GROK_TEXT_INPUT_COST
-        + (cached_tokens / 1_000_000) * GROK_TEXT_CACHED_COST
+    return format_cost(
+        GROK_TEXT_MODEL,
+        prompt_tokens=usage.get('prompt_tokens', 0),
+        completion_tokens=usage.get('completion_tokens', 0),
+        cached_tokens=usage.get('cached_tokens', 0),
+        tool_invocations=usage.get('tool_invocations', 0),
     )
-    output_cost = (completion_tokens / 1_000_000) * GROK_TEXT_OUTPUT_COST
-    tool_cost = (tool_invocations / 1000) * GROK_TOOL_COST if tool_invocations else 0
-    total_cost = input_cost + output_cost + tool_cost
-
-    text = f"${total_cost:.6f} est. ({prompt_tokens} in / {completion_tokens} out)"
-    if tool_invocations:
-        text += f" + {tool_invocations} tools"
-    return text
 
 
 class PersonaSelect(ui.Select):

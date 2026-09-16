@@ -4,7 +4,8 @@ import aiohttp
 import discord
 from discord import Interaction, ui
 
-from config import GROK_IMAGE_MODEL, GROK_IMAGE_OUTPUT_COST, XAI_KEY
+from config import GROK_IMAGE_MODEL, XAI_KEY
+from cost_utils import format_image_cost
 
 
 logger = logging.getLogger('GrokBot')
@@ -87,7 +88,6 @@ class MoreVersionsView(ui.View):
 
             image_urls = await _request_generated_images(prompt, count=4)
             embeds = []
-            bot_url = "https://astrixbot.cf"
 
             for idx, image_url in enumerate(image_urls):
                 if idx == 0:
@@ -101,10 +101,8 @@ class MoreVersionsView(ui.View):
                         text=f"Requested by {interaction.user.display_name}",
                         icon_url=_avatar_url(interaction.user),
                     )
-                    embed.url = bot_url
                 else:
                     embed = discord.Embed()
-                    embed.url = bot_url
                 embed.set_image(url=image_url)
                 embeds.append(embed)
 
@@ -127,7 +125,7 @@ async def generate_image(message, prompt: str):
         async with message.channel.typing():
             image_url = (await _request_generated_images(prompt, count=1))[0]
 
-        usage_text = f"${GROK_IMAGE_OUTPUT_COST:.2f} (est.)"
+        usage_text = format_image_cost()
         embed = discord.Embed(
             title="Grok AI Generated Image",
             description=f"**Prompt:** {prompt}",

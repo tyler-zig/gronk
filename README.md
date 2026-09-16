@@ -47,21 +47,44 @@ A Discord bot that integrates with xAI's Grok API to answer questions, with adva
 ### Python Dependencies
 All dependencies are listed in `requirements.txt`:
 - `discord.py` - Discord bot framework
-- `openai` - OpenAI-compatible client (used for vision API)
-- `xai-sdk` - Official xAI SDK for chat, file uploads, web search, X search, and code execution
+- `xai-sdk` - Official xAI SDK for chat, native image understanding, file uploads, web search, X search, and code execution
 - `aiohttp` - Async HTTP client for image generation API
 - `python-dotenv` - Environment variable management
 - `pytz` - Timezone handling for accurate timestamps
 - `spacy` - Advanced NLP for entity and topic extraction
-- `torch` - Required for transformer-based intent classification
-- `transformers` - Hugging Face zero-shot intent classification
+- `pydantic` - Structured output schemas for Grok API responses
 
 ### Optional
 - **Docker** - For containerized deployment (includes all NLP dependencies and spaCy model)
 - **Git** - For cloning the repository and version control
 
 ## Advanced NLP Features (NEW!)
--
+
+The bot uses local NLP helpers for query understanding and routing:
+
+- **Entity Extraction**: Uses spaCy to extract people, dates, organizations, and topics from queries
+- **Topic Detection**: Identifies key topics and noun phrases for more accurate search and filtering
+- **Intent Detection**: Uses lightweight local patterns for image generation and Discord history routing
+- **Multi-word & Contextual Keywords**: Supports complex queries like "What did @john say about crypto between January and March?"
+
+**Example Queries:**
+```
+Who mentioned Python and AI the most in the last year?
+What did @john say about crypto between January and March?
+Summarize our discussions about machine learning in this channel.
+Who are the most active users here in the past week?
+What topics did @role members talk about last Friday?
+Who is the most famous AI researcher in the world?
+Summarize news from last week.
+```
+
+**Testing Advanced NLP:**
+Run the test script to see entity, topic, and intent extraction:
+```powershell
+python test_advanced_nlp.py "Who talked about AI and crypto in the last year?"
+```
+Output will show extracted entities, topics, and intent.
+
 ## Document Support (NEW!)
 
 You can now upload documents as Discord attachments when mentioning the bot or replying to it. The bot uses the official xAI SDK to upload files and analyze them with Grok. This enables:
@@ -93,32 +116,6 @@ You can now upload documents as Discord attachments when mentioning the bot or r
 - The file references are included in the Grok chat using the SDK's `file()` helper
 - Grok analyzes the document content and responds
 - Files are automatically cleaned up after analysis
-
-The bot now uses state-of-the-art NLP for deeper understanding of queries:
-
-- 🏷️ **Entity Extraction**: Uses spaCy to extract people, dates, organizations, and topics from queries
-- 🧠 **Topic Detection**: Identifies key topics and noun phrases for more accurate search and filtering
-- 🎯 **Intent Classification**: Uses Hugging Face transformers (zero-shot) to classify query intent (e.g., Discord history, general knowledge, user search, topic summary)
-- 🔬 **Multi-word & Contextual Keywords**: Supports complex queries like "What did @john say about crypto between January and March?"
-- 🌐 **Multilingual Ready**: spaCy and transformers can be extended for other languages
-
-**Example Queries:**
-```
-Who mentioned Python and AI the most in the last year?
-What did @john say about crypto between January and March?
-Summarize our discussions about machine learning in this channel.
-Who are the most active users here in the past week?
-What topics did @role members talk about last Friday?
-Who is the most famous AI researcher in the world?
-Summarize news from last week.
-```
-
-**Testing Advanced NLP:**
-Run the test script to see entity, topic, and intent extraction:
-```powershell
-python test_advanced_nlp.py "Who talked about AI and crypto in the last year?"
-```
-Output will show extracted entities, topics, and intent.
 
 ## Setup
 
@@ -177,7 +174,7 @@ Output will show extracted entities, topics, and intent.
    # Model Configuration (Optional - defaults shown)
   GROK_TEXT_MODEL=grok-4.3
   GROK_VISION_MODEL=grok-4.3
-  GROK_IMAGE_MODEL=grok-imagine-image-quality
+  GROK_IMAGE_MODEL=grok-imagine-image-2.0
   GROK_DOCUMENT_MODEL=grok-4.3
    
    # Timezone Configuration (Optional - defaults to America/Chicago)
@@ -203,21 +200,21 @@ Output will show extracted entities, topics, and intent.
   GROK_TEXT_CACHED_COST=0.20
   GROK_VISION_INPUT_COST=1.25
   GROK_VISION_OUTPUT_COST=2.50
-  GROK_IMAGE_OUTPUT_COST=0.05
+  GROK_IMAGE_OUTPUT_COST=0.04
   GROK_TOOL_COST=5.00
    ```
    
    **Configuration Options:**
-   - **GROK_TEXT_MODEL**: Model used for text-only responses (default: grok-4.3)
-  - **GROK_VISION_MODEL**: Model used when analyzing images (default: grok-4.3)
+   - **GROK_TEXT_MODEL**: Model used for text-only responses (default: grok-4.3; cheapest current general model with native vision)
+  - **GROK_VISION_MODEL**: Model used when analyzing images (default: same as text; dedicated vision slugs are retired)
   - **GROK_DOCUMENT_MODEL**: Model used when analyzing uploaded documents (default: grok-4.3)
-  - **GROK_IMAGE_MODEL**: Model used for image generation (default: grok-imagine-image-quality)
+  - **GROK_IMAGE_MODEL**: Model used for image generation (default: grok-imagine-image-2.0)
    - **TIMEZONE**: Timezone for message timestamps (default: America/Chicago)
    - **ENABLE_WEB_SEARCH**: Enable/disable live web search (default: true)
    - **ENABLE_X_SEARCH**: Enable X/Twitter search (default: false)
    - **ENABLE_CODE_EXECUTION**: Enable Python code execution (default: false)
    - **ENABLE_PROMPT_CACHE_HINTS**: Send stable conversation/cache IDs to improve prompt cache hits (default: true)
-   - **GROK_REASONING_EFFORT**: Reasoning effort for normal chat, one of `none`, `low`, `medium`, `high` (default: low)
+   - **GROK_REASONING_EFFORT**: Reasoning effort for normal chat, one of `none`, `low`, `medium`, `high`, `xhigh` (default: low)
    - **GROK_ANALYSIS_REASONING_EFFORT**: Reasoning effort for document, image, and Discord history analysis (default: high)
    - **MAX_KEYWORD_SCAN**: Maximum messages to scan for keyword searches (default: 10,000)
    - **MAX_MESSAGES_ANALYZED**: Maximum messages sent to Grok for analysis (default: 500, higher = better analysis but more cost)
@@ -231,7 +228,7 @@ Output will show extracted entities, topics, and intent.
   ```powershell
   pip install -r requirements.txt
   ```
-  This will install all required NLP libraries (spaCy, torch, transformers). The first run will download the spaCy English model automatically.
+  This will install all required libraries. The first run will download the spaCy English model automatically if needed.
 
 2. Run the bot:
   ```powershell
@@ -255,6 +252,61 @@ docker run --env-file .env gronk-bot
 This ensures all NLP features work out of the box in containers.
 
 ## Usage
+
+### World of Warcraft Guild/Channel Bridge
+
+This repo also includes an experimental WoW addon plus local bridge so guild or channel chat can queue Grok questions with a trigger like `!grok`.
+
+Important limitation: WoW addons cannot call Grok/xAI directly. The addon writes queued questions to `SavedVariables`; `wow_bridge.py` calls Grok outside the game and writes responses back. Because WoW saves its current in-memory variables during `/reload` and logout, the reliable flow is: queue questions in game, log out or exit to save them, run the bridge, then log back in to load the responses.
+
+**Install the addon:**
+1. Copy `wow-addon/Gronk` into your WoW AddOns folder, for example:
+   ```powershell
+   Copy-Item -Recurse .\wow-addon\Gronk "C:\Program Files (x86)\World of Warcraft\_retail_\Interface\AddOns\Gronk"
+   ```
+   For TBC Anniversary, use that client folder instead:
+   ```powershell
+   Copy-Item -Recurse .\wow-addon\Gronk "C:\Program Files (x86)\World of Warcraft\_anniversary_\Interface\AddOns\Gronk"
+   ```
+2. Enable `Gronk` on the WoW addon screen.
+3. In game, check config with:
+   ```text
+   /gronk
+   ```
+
+**Ask from chat:**
+```text
+!grok what should I know before this boss?
+```
+
+By default only guild chat is enabled, and responses are draft-only. The addon prints returned answers locally instead of posting them to chat.
+
+**Run the bridge once:**
+```powershell
+python wow_bridge.py --saved-variables "C:\Program Files (x86)\World of Warcraft\_anniversary_\WTF\Account\ACCOUNT_NAME\SavedVariables\Gronk.lua"
+```
+
+Or set `WOW_GRONK_SAVED_VARIABLES` in `.env` and run:
+```powershell
+python wow_bridge.py
+```
+
+After the bridge writes responses, log back into WoW to load and display them. In auto mode, the addon posts loaded responses after `PLAYER_LOGIN`.
+
+**Config commands:**
+```text
+/gronk                          # open the in-game config UI
+/gronk status                   # print current config and queue counts
+/gronk draft                    # local draft mode, safest default
+/gronk auto                     # post loaded responses back to chat after login
+/gronk trigger ?grok            # change trigger text
+/gronk channel CHANNEL          # toggle numbered/custom channels
+/gronk allowname guild-help     # restrict CHANNEL mode to a named channel
+/gronk ask your question here   # queue a manual guild-targeted request
+/gronk clear                    # clear local queue and responses
+```
+
+Auto mode is intentionally configurable because it can spam guild/channel chat if abused. Review your realm, guild, and Blizzard policy comfort level before enabling it.
 
 
 ### Image Generation
@@ -280,9 +332,9 @@ Gronk can generate AI images directly in Discord using natural language:
 - Click "Generate More Versions" to get 4 new variations of your prompt (costs scale per image).
 - To adjust or iterate, reply to the image embed with a new prompt or additional details—the bot will combine your new text with the original prompt for the next generation.
 
-**Cost:** Each generated image is billed at the rate set in your `.env` (`GROK_IMAGE_OUTPUT_COST`, default: $0.05 per 1K image). Generating more versions multiplies the cost (e.g., 4 images = $0.20).
+**Cost:** Each generated image is billed at the rate set in your `.env` (`GROK_IMAGE_OUTPUT_COST`, default: $0.04 for Imagine 2.0). Generating more versions multiplies the cost (e.g., 4 images = $0.16).
 
-**Supported Models:** Uses the model set in `GROK_IMAGE_MODEL` (default: `grok-imagine-image-quality`).
+**Supported Models:** Uses the model set in `GROK_IMAGE_MODEL` (default: `grok-imagine-image-2.0`).
 
 **Note:** Image generation requires an xAI API key with image generation enabled. See the [Cost Information](#cost-information) section for details.
 
@@ -398,7 +450,7 @@ Tool-enabled requests are billed as Grok 4.3 token usage plus tool invocations. 
 - **Image understanding during Web/X Search (`view_image`)**: token-based, not a separate tool invocation fee
 
 **Image Generation:**
-- **Grok Imagine image generation**: Configurable via `GROK_IMAGE_OUTPUT_COST` (default: $0.05 per 1K image; 2K is currently $0.07)
+- **Grok Imagine image generation**: Configurable via `GROK_IMAGE_OUTPUT_COST` (default: $0.04 for `grok-imagine-image-2.0`)
 
 > **Note:** Pricing and models are subject to change by xAI. Check [x.ai/api](https://x.ai/api) for current pricing. To update models, edit `GROK_TEXT_MODEL`, `GROK_VISION_MODEL`, `GROK_DOCUMENT_MODEL`, and `GROK_IMAGE_MODEL` in your `.env` file.
 
@@ -406,11 +458,11 @@ Tool-enabled requests are billed as Grok 4.3 token usage plus tool invocations. 
 
 ## Architecture
 
-- **Models**: Grok 4.3 for text, image understanding, and document analysis; image generation remains configured separately with `GROK_IMAGE_MODEL`
+- **Models**: Grok 4.3 for text, native image understanding, and document analysis; image generation uses `grok-imagine-image-2.0`
 - **Code Layout**:
   - `main.py`: Discord bot wiring, message routing, and response orchestration
   - `config.py`: environment loading and runtime configuration
-  - `grok_client.py`: OpenAI-compatible xAI client and SDK chat helper
+  - `grok_client.py`: xAI SDK chat helper with native image understanding and agent tools
   - `grok_responder.py`: Grok request routing, response embeds, cost display, and conversation storage
   - `image_generation.py`: image generation and revision flow
   - `persona_manager.py`: persona generation, JSON persistence, and Discord selection UI

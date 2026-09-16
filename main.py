@@ -8,6 +8,7 @@ from config import (
     ENABLE_NL_HISTORY_SEARCH,
     TOKEN,
 )
+from continue_thread import ContinueThreadView
 from conversation_store import (
     cleanup_old_conversations,
     get_conversation,
@@ -21,6 +22,7 @@ from media_utils import collect_attachment_media, collect_embed_media, collect_i
 from nlp_utils import advanced_nlp_parse
 from persona_manager import handle_persona_request, is_persona_request
 from reply_context import add_reply_context
+from verbosity import handle_verbosity_request
 
 bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
 
@@ -34,10 +36,11 @@ async def on_ready():
     logger.info(f'Bot logged in as {bot.user} (ID: {bot.user.id})')
     logger.info(f'Connected to {len(bot.guilds)} server(s)')
     bot.add_view(MoreVersionsView())
-    
+    bot.add_view(ContinueThreadView())
+
     # Clean up old conversations on startup
     cleanup_old_conversations()
-    
+
     # Schedule periodic cleanup (every 6 hours)
     bot.loop.create_task(periodic_cleanup())
 
@@ -57,23 +60,41 @@ async def on_message(message):
     # Check if bot is mentioned OR if user is replying to bot's message
     is_bot_mentioned = bot.user in message.mentions
     is_replying_to_bot = False
+    is_in_bot_thread = False  # True if message is in a thread the bot participates in
     replied_msg = None
     previous_xai_response_id = None  # For xAI Chat Responses API continuation
     if message.reference:
         try:
             replied_msg = await message.channel.fetch_message(message.reference.message_id)
             is_replying_to_bot = replied_msg.author == bot.user
-            
+
             # Check if we have a stored xAI response ID for this conversation
             if is_replying_to_bot:
                 stored_convo = get_conversation(replied_msg.id)
                 if stored_convo and stored_convo.get('xai_response_id'):
                     previous_xai_response_id = stored_convo['xai_response_id']
                     logger.info(f'Found previous xAI response ID: {previous_xai_response_id}')
-        except:
+        except Exception:
             pass
 
-    if is_bot_mentioned or is_replying_to_bot:
+    # In a thread where the bot has previously participated, treat new top-level
+    # messages and replies-to-bot as implicit mentions (frictionless Continue flow).
+    # But stay out of human-to-human side conversations — if someone replies to
+    # another human in the thread, the bot won't interrupt.
+    replying_to_human = replied_msg is not None and replied_msg.author != bot.user
+    if (not is_bot_mentioned and not is_replying_to_bot
+            and not replying_to_human
+            and isinstance(message.channel, discord.Thread)):
+        try:
+            async for hist_msg in message.channel.history(limit=50):
+                if hist_msg.author == bot.user:
+                    is_in_bot_thread = True
+                    logger.info('Implicit mention — bot has participated in thread %s', message.channel.name)
+                    break
+        except Exception:
+            pass
+
+    if is_bot_mentioned or is_replying_to_bot or is_in_bot_thread:
         if is_replying_to_bot:
             logger.info(f'Bot reply detected from {message.author} in #{message.channel}')
         else:
@@ -85,6 +106,12 @@ async def on_message(message):
         prompt = prompt.strip()
         logger.info(f'Normalized prompt for intent detection: "{prompt}"')
 
+        # --- VERBOSITY CONTROL ---
+        # Check before persona/image handling — it's a meta-command about response style
+        if await handle_verbosity_request(message, prompt):
+            return
+
+        # --- PERSONA HANDLING ---
         if is_persona_request(prompt):
             await handle_persona_request(message, prompt)
             return
@@ -93,7 +120,7 @@ async def on_message(message):
                 await handle_persona_request(message, f"refine current persona: {prompt}")
                 return
 
-        # Check if this is a Discord history analysis query (if feature enabled)
+        # --- DISCORD HISTORY SEARCH ---
         # Skip this check if we're replying to a bot message with stored conversation context
         if ENABLE_NL_HISTORY_SEARCH and not previous_xai_response_id:
             target_user = message.mentions[0] if message.mentions and message.mentions[0] != bot.user else None
@@ -111,81 +138,62 @@ async def on_message(message):
                 return  # Don't process as normal query
         elif previous_xai_response_id:
             logger.info(f'Skipping Discord history search check - using stored conversation context (xAI response ID: {previous_xai_response_id})')
-        
-        if is_bot_mentioned or is_replying_to_bot:
-            if is_replying_to_bot:
-                logger.info(f'Bot reply detected from {message.author} in #{message.channel}')
-            else:
-                logger.info(f'Bot mentioned by {message.author} in #{message.channel}')
 
-            # Normalize prompt: remove all bot mentions and extra whitespace
-            prompt = message.content
-            prompt = re.sub(r'<@!?'+str(bot.user.id)+r'>', '', prompt)
-            prompt = prompt.strip()
-            logger.info(f'Normalized prompt for intent detection: "{prompt}"')
+        # --- IMAGE REVISION DETECTION ---
+        # If replying to a bot-generated image, treat as a revision request
+        if is_replying_to_bot and message.reference:
+            try:
+                replied_msg = await message.channel.fetch_message(message.reference.message_id)
+                # Check if the replied message has an image embed with our format
+                if replied_msg.embeds:
+                    for embed in replied_msg.embeds:
+                        if embed.title and "Grok AI Generated Image" in embed.title and embed.description:
+                            # Extract the original prompt from the embed description
+                            original_prompt_match = re.search(r'\*\*Prompt:\*\*\s*(.+)', embed.description)
+                            if original_prompt_match:
+                                original_prompt = original_prompt_match.group(1).strip()
+                                logger.info(f'Detected image revision request. Original prompt: "{original_prompt}"')
+                                logger.info(f'Revision request: "{prompt}"')
+                                # Combine original prompt with revision instructions
+                                revised_prompt = f"{original_prompt}. Revision: {prompt}"
+                                logger.info(f'Combined revised prompt: "{revised_prompt}"')
+                                await generate_image(message, revised_prompt)
+                                return
+            except Exception as e:
+                logger.warning(f'Error checking for image revision: {e}')
 
-            if is_persona_request(prompt):
-                await handle_persona_request(message, prompt)
-                return
+        # --- IMAGE GENERATION NATURAL LANGUAGE DETECTION ---
+        # Use lightweight pattern-based intent detection
+        nlp_result = advanced_nlp_parse(prompt)
+        is_image_request = nlp_result.get('intent') == 'image_generation'
+        if is_image_request:
+            logger.info('Detected image generation intent in natural language')
+            await generate_image(message, prompt)
+            return
 
-            # --- IMAGE REVISION DETECTION ---
-            # If replying to a bot-generated image, treat as a revision request
-            if is_replying_to_bot and message.reference:
-                try:
-                    replied_msg = await message.channel.fetch_message(message.reference.message_id)
-                    # Check if the replied message has an image embed with our format
-                    if replied_msg.embeds:
-                        for embed in replied_msg.embeds:
-                            if embed.title and "Grok AI Generated Image" in embed.title and embed.description:
-                                # Extract the original prompt from the embed description
-                                original_prompt_match = re.search(r'\*\*Prompt:\*\*\s*(.+)', embed.description)
-                                if original_prompt_match:
-                                    original_prompt = original_prompt_match.group(1).strip()
-                                    logger.info(f'Detected image revision request. Original prompt: "{original_prompt}"')
-                                    logger.info(f'Revision request: "{prompt}"')
-                                    # Combine original prompt with revision instructions
-                                    revised_prompt = f"{original_prompt}. Revision: {prompt}"
-                                    logger.info(f'Combined revised prompt: "{revised_prompt}"')
-                                    await generate_image(message, revised_prompt)
-                                    return
-                except Exception as e:
-                    logger.warning(f'Error checking for image revision: {e}')
+        # --- MEDIA COLLECTION ---
+        collect_attachment_media(
+            message,
+            image_urls,
+            document_attachments=document_attachments,
+            unsupported_images=unsupported_images,
+            unsupported_docs=unsupported_docs,
+        )
 
-            # --- IMAGE GENERATION NATURAL LANGUAGE DETECTION ---
-            # Use lightweight pattern-based intent detection
-            nlp_result = advanced_nlp_parse(prompt)
-            is_image_request = nlp_result.get('intent') == 'image_generation'
-            # If detected, call image generation directly
-            if is_image_request:
-                logger.info('Detected image generation intent in natural language')
-                await generate_image(message, prompt)
-                return
+        # Check for image URLs in message content (links to images)
+        collect_image_urls_from_text(message.content, image_urls)
 
-            # --- END IMAGE GENERATION DETECTION ---
-
-            # Existing natural language Discord history detection and follow-up logic...
-            # ...existing code...
-            collect_attachment_media(
-                message,
-                image_urls,
-                document_attachments=document_attachments,
-                unsupported_images=unsupported_images,
-                unsupported_docs=unsupported_docs,
-            )
-
-            # Check for image URLs in message content (links to images)
-            collect_image_urls_from_text(message.content, image_urls)
-        
         # Check for Discord CDN embeds (when links auto-embed like Tenor, Giphy, etc.)
         collect_embed_media(message.embeds, image_urls)
-        
+
+        # --- BUILD CONTEXT AND QUERY GROK ---
         prompt = await add_reply_context(message, prompt, image_urls, previous_xai_response_id)
-        
+
         if not prompt and not image_urls and not document_attachments:
             logger.warning('No prompt, images, or documents found')
             await message.reply("Please provide a question, image, or document after mentioning me.")
             return
-        
+
         # Notify user about unsupported images if any
         if unsupported_images and not image_urls:
             await message.reply(f"Found unsupported image format(s): {', '.join(unsupported_images)}\n\nGrok only supports: JPEG, PNG, and WebP images.")

@@ -1,0 +1,8 @@
+## Interface: 20505
+## Title: Gronk
+## Notes: Capture WoW chat questions for Grok via a local bridge.
+## Author: Gronk
+## Version: 0.1.0
+## SavedVariables: GronkDB
+
+Gronk.lua

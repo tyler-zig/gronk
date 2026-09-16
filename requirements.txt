@@ -1,7 +1,7 @@
 discord.py
-openai
 python-dotenv
 pytz
 spacy==3.7.2
 aiohttp
 xai-sdk
+pydantic

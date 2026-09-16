@@ -1,8 +1,8 @@
 import logging
 
-from openai import OpenAI
 from xai_sdk import AsyncClient as XAIAsyncClient
 from xai_sdk.chat import assistant as xai_assistant
+from xai_sdk.chat import image as xai_image
 from xai_sdk.chat import system as xai_system
 from xai_sdk.chat import user as xai_user
 from xai_sdk.tools import code_execution as xai_code_execution
@@ -15,31 +15,27 @@ from config import (
     ENABLE_WEB_SEARCH,
     ENABLE_X_SEARCH,
     GROK_REASONING_EFFORT,
-    XAI_KEY,
 )
 
 
 logger = logging.getLogger('GrokBot')
 
-client = OpenAI(api_key=XAI_KEY, base_url="https://api.x.ai/v1")
+_VALID_REASONING_EFFORTS = {'none', 'low', 'medium', 'high', 'xhigh'}
 _xai_client = None
 
 
-def normalize_openai_reasoning_effort(effort=None):
+def normalize_reasoning_effort(effort=None):
+    """Return a reasoning_effort value accepted by current Grok models."""
     effort = (effort or GROK_REASONING_EFFORT or '').lower().strip()
-    if effort in {'none', 'low', 'medium', 'high'}:
+    if effort in _VALID_REASONING_EFFORTS:
         return effort
-    logger.warning(f'Unsupported GROK reasoning effort "{effort}", falling back to low')
+    logger.warning('Unsupported GROK reasoning effort "%s", falling back to low', effort)
     return 'low'
 
 
 def normalize_sdk_reasoning_effort(effort=None):
-    effort = normalize_openai_reasoning_effort(effort)
-    if effort == 'none':
-        return None
-    if effort in {'medium', 'high'}:
-        return 'high'
-    return 'low'
+    """Pass through current xAI SDK efforts: none, low, medium, high, xhigh."""
+    return normalize_reasoning_effort(effort)
 
 
 def build_cache_conversation_id(*parts):
@@ -75,6 +71,21 @@ def _count_server_side_tool_usage(usage):
     return 0
 
 
+def _cached_prompt_tokens(usage_obj) -> int:
+    if not usage_obj:
+        return 0
+    for attr in ('cached_prompt_text_tokens', 'cached_tokens', 'cached_prompt_tokens'):
+        value = getattr(usage_obj, attr, None)
+        if isinstance(value, int) and value:
+            return value
+    details = getattr(usage_obj, 'prompt_tokens_details', None)
+    if details is not None:
+        value = getattr(details, 'cached_tokens', None)
+        if isinstance(value, int) and value:
+            return value
+    return 0
+
+
 def get_xai_client():
     """Get or create the global xAI async client."""
     global _xai_client
@@ -87,30 +98,45 @@ def build_sdk_tools():
     """Build list of tools for SDK chat based on configuration."""
     tools = []
     if ENABLE_WEB_SEARCH:
-        tools.append(xai_web_search())
+        tools.append(xai_web_search(enable_image_understanding=True))
     if ENABLE_X_SEARCH:
-        tools.append(xai_x_search())
+        tools.append(xai_x_search(enable_image_understanding=True))
     if ENABLE_CODE_EXECUTION:
         tools.append(xai_code_execution())
     return tools if tools else None
 
 
+def _user_message(user_prompt: str, image_urls=None):
+    prompt = user_prompt or ("What's in this image?" if image_urls else "")
+    if not image_urls:
+        return xai_user(prompt)
+    # detail="auto" lets xAI pick resolution so we don't overspend on image tokens.
+    return xai_user(prompt, *[xai_image(url, detail="auto") for url in image_urls])
+
+
 async def sdk_chat_request(model: str, system_prompt: str, user_prompt: str,
                            conversation_history: list = None, include_search: bool = True,
                            previous_response_id: str = None, response_format=None,
-                           reasoning_effort: str = None, conversation_id: str = None) -> tuple:
+                           reasoning_effort: str = None, conversation_id: str = None,
+                           image_urls: list = None) -> tuple:
     """
     Make a chat request using the xAI SDK Agent Tools API.
+
+    Image understanding uses the same current chat models (no separate vision slug).
+    Stored conversation continuation is skipped when images are present — xAI
+    recommends not persisting image request history.
 
     Returns: (response_content: str, usage_dict: dict, citations: list, response_id: str)
     """
     xai_client = get_xai_client()
     tools = build_sdk_tools() if include_search else None
     sdk_reasoning_effort = normalize_sdk_reasoning_effort(reasoning_effort)
+    has_images = bool(image_urls)
 
     chat_kwargs = {
         'model': model,
-        'store_messages': True,
+        # Image turns should not be stored; xAI can fail those requests.
+        'store_messages': not has_images,
         'tools': tools,
         'include': ["inline_citations"],
     }
@@ -121,11 +147,13 @@ async def sdk_chat_request(model: str, system_prompt: str, user_prompt: str,
     if response_format:
         chat_kwargs['response_format'] = response_format
 
-    if previous_response_id:
-        logger.info(f'Continuing conversation from xAI response ID: {previous_response_id}')
+    if previous_response_id and not has_images:
+        logger.info('Continuing conversation from xAI response ID: %s', previous_response_id)
         chat_kwargs['previous_response_id'] = previous_response_id
         chat = xai_client.chat.create(**chat_kwargs)
     else:
+        if previous_response_id and has_images:
+            logger.info('Skipping stored conversation continuation because this turn includes images')
         messages = [xai_system(system_prompt)]
 
         if conversation_history:
@@ -140,7 +168,7 @@ async def sdk_chat_request(model: str, system_prompt: str, user_prompt: str,
         chat_kwargs['messages'] = messages
         chat = xai_client.chat.create(**chat_kwargs)
 
-    chat.append(xai_user(user_prompt))
+    chat.append(_user_message(user_prompt, image_urls))
     if response_format:
         response, parsed = await chat.parse(response_format)
         content = parsed.model_dump_json() if hasattr(parsed, 'model_dump_json') else parsed.json()
@@ -152,18 +180,18 @@ async def sdk_chat_request(model: str, system_prompt: str, user_prompt: str,
     response_id = response.id if response and hasattr(response, 'id') else None
 
     if citations:
-        logger.info(f'Got {len(citations)} citations (sources examined)')
+        logger.info('Got %d citations (sources examined)', len(citations))
 
     if response and hasattr(response, 'tool_calls') and response.tool_calls:
-        logger.info(f'Tool invocations: {len(response.tool_calls)} calls')
+        logger.info('Tool invocations: %d calls', len(response.tool_calls))
         for tool_call in response.tool_calls:
             if hasattr(tool_call, 'function'):
-                logger.info(f'  - {tool_call.function.name}')
+                logger.info('  - %s', tool_call.function.name)
     if response and hasattr(response, 'server_side_tool_usage') and response.server_side_tool_usage:
-        logger.info(f'Server-side tool usage: {response.server_side_tool_usage}')
+        logger.info('Server-side tool usage: %s', response.server_side_tool_usage)
 
     if response_id:
-        logger.info(f'Got xAI response ID: {response_id}')
+        logger.info('Got xAI response ID: %s', response_id)
 
     usage = {}
     tool_invocations = 0
@@ -174,12 +202,15 @@ async def sdk_chat_request(model: str, system_prompt: str, user_prompt: str,
         tool_invocations = max(tool_invocations, _count_server_side_tool_usage(response.server_side_tool_usage))
 
     if response and hasattr(response, 'usage') and response.usage:
+        prompt_tokens = getattr(response.usage, 'prompt_tokens', 0) or (response.usage.total_tokens // 2)
+        completion_tokens = getattr(response.usage, 'completion_tokens', 0) or (response.usage.total_tokens // 2)
         usage = {
-            'prompt_tokens': getattr(response.usage, 'prompt_tokens', 0) or (response.usage.total_tokens // 2),
-            'completion_tokens': getattr(response.usage, 'completion_tokens', 0) or (response.usage.total_tokens // 2),
+            'prompt_tokens': prompt_tokens,
+            'completion_tokens': completion_tokens,
+            'cached_tokens': _cached_prompt_tokens(response.usage),
             'total_tokens': response.usage.total_tokens if hasattr(response.usage, 'total_tokens') else 0,
             'tool_invocations': tool_invocations,
-            'num_citations': len(citations) if citations else 0
+            'num_citations': len(citations) if citations else 0,
         }
 
     return content, usage, citations, response_id

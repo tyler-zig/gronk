@@ -1,18 +1,32 @@
+"""Lightweight NLP helpers for intent detection and entity extraction."""
+
 import logging
 import re
+from functools import lru_cache
 
 import spacy
 
 
 logger = logging.getLogger('GrokBot')
 
+_nlp_spacy = None
 
-try:
-    nlp_spacy = spacy.load('en_core_web_sm')
-except OSError:
-    import subprocess
-    subprocess.run(['python', '-m', 'spacy', 'download', 'en_core_web_sm'])
-    nlp_spacy = spacy.load('en_core_web_sm')
+
+def _get_spacy_model():
+    """Lazy-load the spaCy model. Downloads en_core_web_sm if missing."""
+    global _nlp_spacy
+    if _nlp_spacy is not None:
+        return _nlp_spacy
+
+    try:
+        _nlp_spacy = spacy.load('en_core_web_sm')
+    except OSError:
+        logger.info('spaCy en_core_web_sm model not found — downloading now …')
+        import subprocess
+        subprocess.run(['python', '-m', 'spacy', 'download', 'en_core_web_sm'], check=True)
+        _nlp_spacy = spacy.load('en_core_web_sm')
+
+    return _nlp_spacy
 
 
 INTENT_PATTERNS = {
@@ -36,10 +50,7 @@ INTENT_PATTERNS = {
 
 
 def detect_intent_pattern(text):
-    """
-    Lightweight pattern-based intent detection.
-    Returns the detected intent or None.
-    """
+    """Lightweight pattern-based intent detection. Returns intent name or None."""
     text_lower = text.lower()
     for intent, patterns in INTENT_PATTERNS.items():
         for pattern in patterns:
@@ -49,11 +60,9 @@ def detect_intent_pattern(text):
 
 
 def advanced_nlp_parse(text):
-    """
-    Lightweight NLP using spaCy for entity extraction and regex for intent.
-    Returns dict with entities, topics, and intent.
-    """
-    doc = nlp_spacy(text)
+    """Lightweight NLP: spaCy entities + regex intent. Returns dict."""
+    nlp = _get_spacy_model()
+    doc = nlp(text)
     entities = [(ent.text, ent.label_) for ent in doc.ents]
     topics = [chunk.text for chunk in doc.noun_chunks]
     intent = detect_intent_pattern(text)
@@ -61,5 +70,5 @@ def advanced_nlp_parse(text):
     return {
         'entities': entities,
         'topics': topics,
-        'intent': intent
+        'intent': intent,
     }
